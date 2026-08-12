@@ -1,0 +1,26 @@
+# Secrets and credentials
+.env
+wallet/
+*wallet*/
+*.pem
+*.sso
+*.p12
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# Test and coverage output
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Downloaded bulk data files
+data/
+
+# Tooling caches
+.mypy_cache/
+.ruff_cache/
+uv.lock

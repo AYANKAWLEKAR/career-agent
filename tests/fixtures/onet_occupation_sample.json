@@ -1,0 +1,19 @@
+{
+  "start": 1,
+  "end": 50,
+  "total": 2,
+  "occupation": [
+    {
+      "href": "https://services.onetcenter.org/ws/online/occupations/15-1252.00/",
+      "code": "15-1252.00",
+      "title": "Software Developers",
+      "tags": {"bright_outlook": true, "green": false}
+    },
+    {
+      "href": "https://services.onetcenter.org/ws/online/occupations/29-1141.00/",
+      "code": "29-1141.00",
+      "title": "Registered Nurses",
+      "tags": {"bright_outlook": true, "green": false}
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "SocInfo": {"SocCode": "15-1252.00", "SocTitle": "Software Developers"},
+  "RecordCount": 2,
+  "CertList": [
+    {
+      "Id": "2158-C",
+      "Name": "AWS Certified Solutions Architect - Associate",
+      "Organization": "Amazon Web Services",
+      "OrganizationUrl": "https://aws.amazon.com/certification/",
+      "Acronym": "AWS-CSA",
+      "Description": "Validates ability to design distributed systems on AWS.",
+      "CertAccreditingAgency": ""
+    },
+    {
+      "Id": "0417-N",
+      "Name": "Certified Software Development Professional",
+      "Organization": "IEEE Computer Society",
+      "OrganizationUrl": "https://www.computer.org",
+      "Acronym": "CSDP",
+      "Description": "Demonstrates mastery of software engineering practices.",
+      "CertAccreditingAgency": ""
+    }
+  ]
+}

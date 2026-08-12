@@ -1,0 +1,23 @@
+{
+  "metadata": {"page": 0, "total": 2, "per_page": 100},
+  "results": [
+    {
+      "id": 110635,
+      "school.name": "University of California-Berkeley",
+      "school.city": "Berkeley",
+      "school.state": "CA",
+      "location.lat": 37.870216,
+      "location.lon": -122.259133,
+      "school.ownership": 1
+    },
+    {
+      "id": 166027,
+      "school.name": "Massachusetts Institute of Technology",
+      "school.city": "Cambridge",
+      "school.state": "MA",
+      "location.lat": 42.360095,
+      "location.lon": -71.09416,
+      "school.ownership": 2
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "start": 1,
+  "end": 20,
+  "total": 3,
+  "task": [
+    {
+      "id": 8823,
+      "related": "https://services.onetcenter.org/ws/online/occupations/15-1252.00/details/tasks/8823",
+      "statement": "Analyze user needs and software requirements to determine feasibility of design.",
+      "category": "Core",
+      "importance": 4.28
+    },
+    {
+      "id": 8824,
+      "related": "https://services.onetcenter.org/ws/online/occupations/15-1252.00/details/tasks/8824",
+      "statement": "Modify existing software to correct errors or improve performance.",
+      "category": "Core",
+      "importance": 4.12
+    },
+    {
+      "id": 8831,
+      "related": "https://services.onetcenter.org/ws/online/occupations/15-1252.00/details/tasks/8831",
+      "statement": "Train users to use new or modified equipment.",
+      "category": "Supplemental",
+      "importance": 2.91
+    }
+  ]
+}
