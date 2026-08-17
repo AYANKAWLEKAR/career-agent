@@ -14,9 +14,17 @@ sequences of intermediary occupations leading from the user's inferred current p
 - Ingest O\*NET into the Autonomous Database (occupations, job zones, tasks, skills, related occupations).
 - Enrich occupation embeddings with aggregated job-posting text from Greenhouse and Ashby.
 - Derive a directed occupation graph supporting multi-hop traversal.
-- A user profile schema, with structured skills and an embedding.
+- Extract typed **requirements** (tools, skills, education, experience, certifications) from
+  O\*NET structured files and from posting prose via `llm_parse` at ingest.
+- A user profile schema whose held attributes map into the same requirement vocabulary.
 - Infer starting occupation A from profile text by vector search.
-- Return ranked A→B paths with intermediary occupations and a per-path profile-fit score.
+- Compute per-occupation requirement **coverage** and an explicit **gap list** for a profile.
+- Return ranked A→B paths, scored by `bridge_value` — whether each intermediary is
+  reachable now *and* teaches what the target still demands.
+
+Requirement matching exists to select intermediary jobs. Telling a user which degree to
+enroll in remains out of scope; identifying that a target demands a credential they lack is
+in scope, because that is what makes an intermediary necessary.
 
 ### Explicitly out of scope
 
@@ -51,26 +59,43 @@ before any of this applies.
 | `Skills.txt`, `Abilities.txt`, `Knowledge.txt`, `Work Activities.txt` | `occupation_skills` | Exact transition cost between occupations |
 | `Content Model Reference.txt` | `skill_elements` | Element names and types |
 | `Related Occupations.txt` | `occupation_edges` (`related`) | Seed adjacency, undirected ground truth |
+| `Technology Skills.txt` | `occupation_requirements` (`tool`) | **Named tools per occupation — "Python", "R", "Tableau". Ground-truth requirements, no extraction needed.** |
+| `Tools Used.txt` | `occupation_requirements` (`tool`) | Physical/technical tools |
+| `Education, Training, and Experience.txt` | `occupation_requirements` (`education_level`, `experience`) | Education-level distribution per occupation |
+
+`Technology Skills.txt` is the most underused file in the release for this purpose. It is
+SOC-keyed, already normalized to named commodity software titles, and requires no LLM to
+parse — it supplies the `tool` requirement type outright. Confirm these filenames when the
+archive is unzipped; the release's exact naming should be verified rather than assumed.
 
 `job_zone` is load-bearing and single-sourced. If it is missing or null for an occupation,
 that occupation can participate in `related` edges but cannot receive `career_ladder`
 edges, and is therefore unreachable as an intermediary. Ingest must report null job-zone
 counts as a first-class metric.
 
-### Job postings — Greenhouse and Ashby, enrichment only
+### Job postings — Greenhouse and Ashby, dual purpose
 
 Both APIs are public and unauthenticated (verified HTTP 200):
 
 - `https://boards-api.greenhouse.io/v1/boards/{token}/jobs?content=true`
 - `https://api.ashbyhq.com/posting-api/job-board/{name}`
 
-Postings are staged and then aggregated into occupation embedding input. **No `job_postings`
-table exists.** Postings are absorbed, not retrievable.
+Postings serve two ends: aggregated text feeds occupation embedding input, and the
+requirements section is parsed into typed requirement rows. **No `job_postings` table
+exists** — postings are absorbed as staged payloads, never retrievable as entities.
 
 Binding a posting to an occupation is inference, not ground truth: postings carry free-text
 titles, not SOC codes. Procedure — embed the posting title plus description, vector-search
-`occupations.embedding`, accept the nearest match only if cosine similarity clears a floor
-(0.60 initially), otherwise discard. Discarded postings are counted, not silently dropped.
+`occupations.embedding`, take the nearest match. Two different thresholds apply to that
+match, and the gap between them is deliberate:
+
+| Use | Floor | Why |
+|---|---|---|
+| Embedding enrichment | 0.60 | Text is averaged into a large composite document; a marginal posting adds slight noise and little harm |
+| Requirement attribution | **0.75** | Creates discrete claims — "this occupation requires Python." A misbound posting injects a false requirement that propagates into gap lists and path scoring |
+
+Postings clearing 0.60 but not 0.75 contribute to embeddings only. Postings below 0.60 are
+discarded. Both counts are reported by ingest, never silently dropped.
 
 Requires widening the `staging_raw.source` check constraint to admit `'greenhouse'` and
 `'ashby'`.
@@ -311,7 +336,9 @@ beats returning nothing.
 
 ---
 
-## 6. User profile schema
+## 6. Profile and requirement schema
+
+### 6.1 Profile tables
 
 New migration `009_user_profile.sql`.
 
@@ -337,36 +364,175 @@ create table user_profiles (
   updated_at            timestamp with time zone default systimestamp not null
 );
 
-create table profile_skills (
-  profile_skill_id number generated always as identity primary key,
+create table profile_requirements (
+  profile_requirement_id number generated always as identity primary key,
   profile_id       number not null
-                   constraint profile_skills_profile_fk
+                   constraint profile_reqs_profile_fk
                    references user_profiles (profile_id) on delete cascade,
-  element_id       number
-                   constraint profile_skills_element_fk
-                   references skill_elements (element_id),
-  raw_skill_text   varchar2(300) not null,
-  self_rated_level number(5,2),
-  source           varchar2(30) constraint profile_skills_source_ck
+  requirement_id   number
+                   constraint profile_reqs_item_fk
+                   references requirement_items (requirement_id),
+  raw_text         varchar2(300) not null,
+  requirement_type varchar2(30),
+  ordinal_value    number,
+  evidence         varchar2(500),
+  source           varchar2(30) constraint profile_reqs_source_ck
                    check (source in ('stated', 'inferred_from_title', 'inferred_from_text')),
   created_at       timestamp with time zone default systimestamp not null
 );
 ```
 
-Three choices worth justifying.
+`raw_text` on `user_profiles` is retained permanently. Every downstream inference — the
+embedding, the matched occupation, the extracted requirements — is a lossy derivation, and
+when a path looks wrong the first question is always what the user actually said.
 
-`raw_text` is retained permanently. Every downstream inference — the embedding, the matched
-occupation, the extracted skills — is a lossy derivation, and when a path looks wrong the
-first question is always what the user actually said.
-
-`profile_skills.element_id` is **nullable** while `raw_skill_text` is **not null**. A user
-will state skills with no O\*NET element ("Figma", "bedside manner"). Requiring the mapping
-would force either discarding those skills or inventing bad matches; this shape keeps the
-unmapped text for later reconciliation.
+`profile_requirements.requirement_id` is **nullable** while `raw_text` is **not null**. A
+user will state things with no vocabulary entry ("bedside manner"). Requiring the mapping
+would force either discarding those or inventing bad matches; this shape keeps the unmapped
+text for later reconciliation, and unmapped rows are simply excluded from coverage math.
 
 `matched_occupation_id` and `match_similarity` cache the A-inference so it is not recomputed
 per query, and so a wrong A is visible and correctable rather than buried in an ephemeral
 call.
+
+### 6.2 Requirement vocabulary
+
+New migration `010_requirements.sql`. One canonical vocabulary is shared by occupations and
+profiles, which is what turns matching into relational algebra rather than a similarity
+computation.
+
+```sql
+create table requirement_items (
+  requirement_id   number generated always as identity primary key,
+  requirement_type varchar2(30) not null
+                   constraint requirement_items_type_ck
+                   check (requirement_type in
+                     ('tool', 'skill', 'education_level', 'education_field',
+                      'experience', 'certification')),
+  canonical_text   varchar2(300) not null,
+  normalized_key   varchar2(200) not null,
+  -- education_level: 1-5 per the job-zone table in 7.1
+  -- experience:      years
+  -- null for tool, skill, certification, education_field
+  ordinal_value    number,
+  embedding        vector(384, float32),
+  created_at       timestamp with time zone default systimestamp not null,
+  updated_at       timestamp with time zone default systimestamp not null,
+  constraint requirement_items_uq unique (requirement_type, normalized_key)
+);
+
+create table occupation_requirements (
+  occupation_requirement_id number generated always as identity primary key,
+  occupation_id     number not null
+                    constraint occ_reqs_occupation_fk
+                    references occupations (occupation_id) on delete cascade,
+  requirement_id    number not null
+                    constraint occ_reqs_item_fk
+                    references requirement_items (requirement_id) on delete cascade,
+  importance        number(5,2),
+  frequency_pct     number(5,2),
+  -- rows sharing a non-null group are alternatives: satisfying ANY satisfies the group
+  alternative_group number,
+  source            varchar2(50) not null,
+  created_at        timestamp with time zone default systimestamp not null,
+  constraint occ_reqs_pair_uq unique (occupation_id, requirement_id)
+);
+```
+
+Four decisions that matter.
+
+**Education splits into two types.** `education_level` is ordinal and compared numerically;
+`education_field` is a fuzzy set compared by embedding. "Bachelor's in Data Science" is two
+requirements, not one, because the level and the field fail independently — someone with a
+master's in English satisfies the level and not the field.
+
+**`alternative_group` is required, not a nicety.** "Bachelor's in Data Science, Computer
+Science, or **related fields**" is three `education_field` rows where satisfying one
+satisfies all. Without grouping, a Data Science major would score 1/3 on a requirement they
+fully meet. Null group means the requirement is conjunctive.
+
+**Unique on `(occupation_id, requirement_id)`, not including `source`.** When both O\*NET and
+postings assert Python, that is one requirement with merged evidence, not two. Merge happens
+at load: `source` records the primary provenance, `importance` comes from O\*NET where
+available, `frequency_pct` from posting counts.
+
+**`skill_elements` is not replaced.** The two vocabularies serve different masters and both
+stay: `occupation_skills`/`skill_elements` holds O\*NET's abstract rated elements and drives
+**edge derivation** (complete coverage, numerically rated, every occupation); `requirement_items`
+holds concrete named things and drives **user matching** (nameable, gap-able, actionable).
+Collapsing them would either make edges unreliable or make gap lists unspeakable.
+
+### 6.3 Canonicalization
+
+Mapping an extracted string to a vocabulary entry is the one place vectors and keywords are
+both needed, which is why this uses a **hybrid index** rather than either alone. `R` is a
+single character that embeds meaninglessly but keyword-matches perfectly; "experience
+leading cross-functional teams" is the reverse. A hybrid index over
+`requirement_items.canonical_text` with `embedding` as the vector parameter covers both arms,
+mirroring the `credentials_hybrid_vix` pattern already in `007_indexes.sql`.
+
+Procedure per extracted string: hybrid-search the vocabulary; accept the top hit above 0.80
+combined score; otherwise insert a new `requirement_items` row. The vocabulary therefore
+grows monotonically and self-organizes, at the cost of needing periodic synonym review.
+
+### 6.4 Coverage and gap
+
+Matching is a join. Alternatives collapse via `max` within group, then coverage is
+importance-weighted across groups:
+
+```sql
+with req as (
+  select r.requirement_id, r.requirement_type, r.canonical_text, r.embedding,
+         r.ordinal_value as required_ordinal,
+         nvl(orq.importance, 1) as importance,
+         nvl(orq.alternative_group, -orq.requirement_id) as grp
+  from occupation_requirements orq
+  join requirement_items r on r.requirement_id = orq.requirement_id
+  where orq.occupation_id = :occupation_id
+),
+held as (
+  select pr.requirement_id, pr.ordinal_value as held_ordinal, ri.embedding
+  from profile_requirements pr
+  join requirement_items ri on ri.requirement_id = pr.requirement_id
+  where pr.profile_id = :profile_id
+),
+-- exact credit, with ordinal sufficiency for level/experience types
+exact as (
+  select req.requirement_id, req.grp, req.importance, req.canonical_text,
+         case
+           when h.requirement_id is null then 0
+           when req.required_ordinal is not null
+                and nvl(h.held_ordinal, 0) < req.required_ordinal then 0
+           else 1
+         end as credit
+  from req
+  left join held h on h.requirement_id = req.requirement_id
+),
+-- soft credit: an unmet item may still be semantically covered (Approach B fallback)
+soft as (
+  select e.requirement_id, e.grp, e.importance, e.canonical_text,
+         greatest(e.credit,
+           nvl((select max(1 - vector_distance(req.embedding, h.embedding, cosine))
+                from held h
+                where 1 - vector_distance(req.embedding, h.embedding, cosine) >= 0.75), 0)
+         ) as credit
+  from exact e
+  join req on req.requirement_id = e.requirement_id
+),
+grouped as (
+  select grp, max(importance) as importance, max(credit) as credit
+  from soft group by grp
+)
+select sum(importance * credit) / sum(importance) as coverage
+from grouped;
+```
+
+The gap list is the same query stopping earlier — `soft` rows where `credit = 0`, which
+yields literal rows naming what is missing. That crispness is the entire reason for
+Approach A: "you are missing R and Python" is a database result, not a heuristic.
+
+Soft matches earn partial credit equal to their cosine, never a full 1. A near-synonym is
+evidence, not proof.
 
 ---
 
@@ -374,15 +540,21 @@ call.
 
 ```
 user free text
-  → llm_parse           → current_title, years_experience, education_level, skills
-  → VECTOR_EMBEDDING    → user_profiles.embedding
-  → vector search       → matched_occupation_id (A), match_similarity
-  → recursive CTE       → candidate A→B paths, ranked by total_cost
-  → profile fit rescore → final ranking
+  → llm_parse            → current_title, years_experience, education_level, held items
+  → hybrid canonicalize  → profile_requirements (requirement_id or null)
+  → VECTOR_EMBEDDING     → user_profiles.embedding
+  → vector search        → matched_occupation_id (A), match_similarity
+  → coverage/gap on B    → unmet(user, B)              [§6.4]
+  → recursive CTE        → candidate A→B paths by total_cost
+  → bridge_value rescore → final ranking               [§7.2]
   → tool_log + saved_plans.route
 ```
 
-### A-inference
+Note the ordering: the gap against B is computed **before** paths are ranked, because
+`bridge_value` needs `unmet(user, B)` as an input. A path cannot be scored until the system
+knows what the target still demands.
+
+### 7.1 A-inference
 
 ```sql
 select o.occupation_id, o.soc_code, o.title,
@@ -413,27 +585,51 @@ below `inferred_job_zone`, walk down the top-5 candidates and take the first who
 `match_similarity` alongside a `zone_clamp_failed` note in `tool_log` — the user's stated
 education outranking every semantic match is a signal worth seeing, not one worth hiding.
 
-### Profile fit rescoring
+### 7.2 `bridge_value` rescoring
 
 Graph cost measures whether a transition is plausible *in general*. It says nothing about
-whether it is plausible **for this user**. After the CTE returns candidate paths, each is
-rescored against the profile:
+whether it is plausible **for this user**, or whether it makes progress toward B. Each
+intermediary M on a candidate path is scored on two independent criteria:
 
 ```
-profile_fit(path) = mean over steps s of
-    ( |profile_skills ∩ required_skills(s)| / |required_skills(s)| )
+unmet(user, B) = gap list from §6.4 against the target
 
-final_score(path) = w1 * (1 / (1 + total_cost)) + w2 * profile_fit
+reachability(M) = coverage(user, M)                              -- can I get M now?
+transfer(M, B)  = |req(M) ∩ unmet(user, B)| / |unmet(user, B)|   -- does M teach what B needs?
+
+bridge_value(M) = reachability(M) × transfer(M, B)
 ```
 
-Starting weights `w1 = 0.6`, `w2 = 0.4`, tuned against the demo personas. Intersection is
-computed on mapped `element_id` values; unmapped profile skills are ignored here but remain
-stored.
+The product, not the sum, is deliberate. A job I could get tomorrow that teaches nothing B
+requires is a dead end; a job that teaches everything B requires but that I cannot get is
+not a step at all. Either factor near zero should kill the candidate, and only multiplication
+has that property.
 
-This is the step that makes two users asking for the same B get different paths, and it is
-the difference between a graph query and a career navigator.
+Path-level score:
 
-### Persistence
+```
+path_bridge(path) = mean over intermediaries M of bridge_value(M)
+final_score(path) = w1 * (1 / (1 + total_cost)) + w2 * path_bridge
+```
+
+Starting weights `w1 = 0.4`, `w2 = 0.6` — deliberately inverted from graph-cost dominance,
+because requirement evidence is concrete where edge weight is a similarity heuristic. Both
+tune against the demo personas.
+
+`transfer` is computed with a join against the same `occupation_requirements` rows used for
+coverage, so no new retrieval path is needed:
+
+```sql
+select count(distinct orq.requirement_id) / :unmet_count as transfer
+from occupation_requirements orq
+where orq.occupation_id = :candidate_id
+  and orq.requirement_id in (select column_value from table(:unmet_ids));
+```
+
+This is the step that makes two users targeting the same B receive different routes, and it
+is the difference between a graph query and a career navigator.
+
+### 7.3 Persistence
 
 `saved_plans.route` holds the ordered occupation list as JSON. `retrieval_evidence` records
 each surfaced intermediary with `source_type = 'route_node'` and its score, with
@@ -448,6 +644,12 @@ measurable later.
 |---|---|
 | Occupation has null `job_zone` | Excluded from derived edges; counted and reported by ingest |
 | Posting matches no occupation above 0.60 | Discarded, counted; never force-assigned |
+| Posting scores 0.60–0.75 | Contributes to embeddings only; no requirements attributed |
+| Extracted string matches no vocabulary entry above 0.80 | New `requirement_items` row inserted; flagged for synonym review |
+| Profile item unmappable to vocabulary | Stored with null `requirement_id`, excluded from coverage math, never silently dropped |
+| Target B has zero requirements on record | `unmet` is empty, `transfer` undefined — fall back to graph cost alone (`w2 = 0`) and say so |
+| `unmet(user, B)` is empty because user already qualifies | Report "you already meet the stated requirements" rather than fabricating a path |
+| LLM extraction returns malformed output | Posting skipped, staged payload retained, counted; extraction is re-runnable |
 | `embedding_source` exceeds model token limit | Truncated at composition time, importance-ordered so the tail is least valuable |
 | No A→B path within 4 hops | Relax to `related`, then report nearest reachable with explanation |
 | Profile embeds to low similarity everywhere (best < 0.40) | Surface as "could not place your background" rather than guessing A |
@@ -463,7 +665,15 @@ Unit tests, no database:
 - Path-cost arithmetic and the both-sided cycle guard, including the 12-vs-123 substring case.
 - `embedding_source` composition: ordering by importance, truncation boundary, absent postings.
 - Job-zone edge rules as a pure function: each of the four zone relations yields the right edge type or none.
-- Profile fit scoring with empty skills, fully overlapping skills, and unmapped-only skills.
+- Coverage math: `alternative_group` collapse (a Data Science major scores 1.0, not 0.33, against "DS, CS, or related"), ordinal insufficiency ("2 years" fails "3+ years" despite an exact item match), importance weighting, unmapped-only profiles.
+- `bridge_value` products: either factor at zero yields zero; both at 1.0 yields 1.0.
+- Requirement-type routing: `education_level` compares ordinally, `education_field` compares by embedding, `tool` compares exactly.
+
+Integration tests requiring the vocabulary:
+
+- The worked example from §6.4 end to end — required `{bachelor, DS|CS, R, Python}` against a profile of `{bachelor, Data Science, research experience}` must yield coverage reflecting met education and a gap list of exactly `{R, Python}`, with "research experience" recorded as surplus and not penalized.
+- Canonicalization of `R` versus `R programming` versus `R (programming language)` collapsing to one vocabulary entry via the hybrid index.
+- A posting binding at 0.68 contributing to `embedding_source` while adding zero rows to `occupation_requirements`.
 
 Integration tests against a seeded 23ai instance:
 
@@ -478,8 +688,16 @@ makes it the only test that can prove the traversal semantics are actually right
 
 ## 10. Open questions
 
-1. Demo personas are pending. Threshold values (0.65, 0.75, 0.60) and scoring weights
-   (0.6/0.4) are starting points to be tuned once personas exist.
+1. Demo personas are pending. Every threshold (edge 0.65/0.75, posting bind 0.60/0.75,
+   canonicalization 0.80, soft match 0.75) and both scoring weights (0.4/0.6) are starting
+   points to be tuned once personas exist.
 2. Whether `max_hops` should be 3 rather than 4 depends on observed graph diameter after
    edges are built.
 3. 23ai provisioning is unresolved and blocks everything in sections 3 through 7.
+4. `tool_log.call_type` has no value for requirement gap analysis. Its check constraint needs
+   `requirement_gap_analysis` added, or the operation must be logged under an existing value.
+5. Company board tokens for Greenhouse and Ashby are an unspecified curated list. Requirement
+   quality depends directly on which employers are sampled — a list skewed to startups will
+   overstate tool requirements and understate credential requirements.
+6. `requirement_items` grows monotonically with no dedupe pass specified beyond the 0.80
+   canonicalization floor. A synonym review step will eventually be needed.
