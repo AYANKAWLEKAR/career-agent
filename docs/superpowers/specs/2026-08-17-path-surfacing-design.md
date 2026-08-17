@@ -26,6 +26,23 @@ Requirement matching exists to select intermediary jobs. Telling a user which de
 enroll in remains out of scope; identifying that a target demands a credential they lack is
 in scope, because that is what makes an intermediary necessary.
 
+### Occupational universe
+
+Restricted to three verticals rather than the full O\*NET taxonomy:
+
+| Vertical | SOC families |
+|---|---|
+| Tech | `15-1xxx` (computer occupations), `15-2xxx` (mathematical science) |
+| Finance | `13-2xxx` (financial specialists), `11-3031` (financial managers) |
+| Research | `19-xxxx` (life, physical, social science) |
+
+This yields roughly 100–150 occupations rather than ~1,000, which has two consequences the
+design depends on. Exact all-pairs skill comparison becomes cheap (§4.2), and the job-zone
+distribution compresses toward zones 4–5, which threatens the directional gating (§4.3, §10).
+
+Occupations outside these families are not ingested. Widening scope later means re-running
+ingest and edge derivation, not a schema change.
+
 ### Explicitly out of scope
 
 These are deferred, not cancelled. The schema already accommodates them.
@@ -35,7 +52,10 @@ These are deferred, not cancelled. The schema already accommodates them.
 | Education programs (`relational_query_programs`, College Scorecard) | Scope is intermediary jobs, not education advice. Also blocked on the CIP↔SOC crosswalk. |
 | Credentials (CareerOneStop) | Not needed to surface intermediary jobs; blocked on registration. |
 | Spatial / metro queries | Geography does not affect which occupations bridge A and B. |
-| Wage-based path ranking (BLS) | Optional tiebreaker only. Design supports adding it without topology changes. |
+
+Wages are **no longer deferred**. BLS OEWS is ingested as the primary wage source and applied
+as a penalty on derived edge weights (§4.3). Ashby posting compensation is layered on as
+enrichment where available. See §2 for why OEWS is the base rather than postings.
 
 ### Blocking prerequisite
 
@@ -104,26 +124,67 @@ The purpose is vocabulary coverage. O\*NET says "develop applications using prog
 languages"; postings say "React, TypeScript, Kubernetes." User profiles read like postings,
 not like O\*NET, so enrichment closes a real vocabulary gap in A-inference.
 
+### Wages — OEWS primary, Ashby enrichment
+
+Two sources with different roles, because they are not the same kind of number.
+
+**BLS OEWS → `metro_wages`, national rows only (`metro_id is null`).** This is the source the
+edge wage penalty reads. It gives a true median across every employer in an occupation, plus
+percentiles, with complete coverage of all three verticals. One free download, no key.
+
+**Ashby compensation → enrichment on the target occupation.** Verified structured: the API
+returns a `compensation` object with `compensationTiers[].components[]` carrying
+`minValue`, `maxValue`, `currencyCode`, `interval`, and `compensationType`, plus a
+`scrapeableCompensationSalarySummary` string. Salary is separable from equity and bonus.
+
+Ashby comp is **not** used for gating, for three reasons that survive the narrowed scope. An
+advertised band is not a median — taking the midpoint of a $129k–$175k range and treating it
+as central tendency invents a statistic. The sample is biased twice: only employers currently
+hiring, and only those in jurisdictions whose transparency laws compel disclosure. And
+observed payloads came back in EUR and CAD, so any aggregate use requires FX normalization
+and therefore a time-varying dependency.
+
+Coverage across the three verticals is uneven and worth tracking as an ingest metric: tech is
+well represented on these boards, finance partially (fintech yes, traditional banking and PE
+largely elsewhere), research weakly (academic and lab roles mostly use other systems).
+
+Greenhouse comp is available but unstructured — `pay_input_ranges` returned null on the board
+tested, with the range embedded in description prose ("The national pay range for this role
+is $129,000 - $175,000 CAD"). Extracting it is possible via the same `llm_parse` pass that
+handles requirements, but Ashby's structured object is preferred where both exist.
+
 ### Ingest ordering
 
 Order is forced by dependency:
 
 ```
-1. occupations + job_zones      (nodes must exist)
-2. skill_elements               (referenced by occupation_skills)
-3. tasks, occupation_skills     (embedding input + transition cost)
-4. related edges                (needs occupation_id resolution)
-5. job postings → staging       (independent, can run anytime after 1)
-6. build embedding_source text  (needs 1, 3, 5)
-7. generate embeddings          (needs 6)
-8. create vector index          (007_indexes.sql — after load, before step 9)
-9. derive career_ladder / skill_overlap edges  (needs 7 and 8)
+GRAPH BRANCH
+ 1. occupations + job_zones      (nodes must exist; filtered to the three verticals)
+ 2. skill_elements               (referenced by occupation_skills)
+ 3. occupation_skills            (transition cost)
+ 4. related edges                (needs occupation_id resolution)
+ 5. OEWS national wages          (needed by step 6's wage penalty)
+ 6. derive career_ladder / skill_overlap edges   (needs 1, 3, 5)
+
+SEMANTIC BRANCH
+ 7. tasks                        (embedding input)
+ 8. job postings → staging       (independent, anytime after 1)
+ 9. requirements extraction      (needs 1, 8 — llm_parse)
+10. build embedding_source text  (needs 1, 7, 8)
+11. generate embeddings          (needs 10)
+12. create vector index          (007_indexes.sql — last)
 ```
 
-Note that `007_indexes.sql` lands at step 8, not last. Its own header warns against running
-it before bulk load, which is still respected — but edge derivation in step 9 uses
-`FETCH APPROX FIRST`, which requires the vector index to exist. So the index is built after
-data is loaded and embedded, and before edges are derived.
+The two branches are independent, which is new. Dropping the vector prefilter from §4.2 means
+**edge derivation no longer depends on embeddings at all** — exact skill cosine reads
+`occupation_skills` directly. So the graph can be built and validated before the ONNX model is
+ever loaded, and `007_indexes.sql` returns to running last, exactly as its own header intends.
+
+That decoupling is worth protecting. It means a broken embedding pipeline cannot block graph
+work, and a graph bug cannot be mistaken for a retrieval bug.
+
+Step 5 is a soft dependency: if OEWS is absent, step 6 still runs with `penalty = 1.0`
+throughout (§4.4), producing a valid graph with no wage correction.
 
 ---
 
@@ -189,31 +250,23 @@ These are undirected similarity and are **excluded from path traversal** by defa
 exist for explanation ("these roles are adjacent") and as a fallback when no directed path
 is found.
 
-### 4.2 Candidate generation — two-stage
+### 4.2 Candidate generation — exact all-pairs
 
-Comparing all occupation pairs on exact skill overlap is O(n²) over ~1,000 occupations with
-~120 skill rows each, which produces a very large intermediate join. Instead, narrow first
-with the vector index, then compute exact overlap only on survivors.
+The vertical restriction in §1 makes this simple. At ~150 occupations there are ~22,000
+ordered pairs, so exact weighted skill cosine runs over the whole universe directly — no
+approximate prefilter, no `edge_candidates` staging table.
 
-**Stage 1 — approximate neighbors via vector index:**
+An earlier revision used a vector-index prefilter (`FETCH APPROX FIRST 25`) to avoid a
+million-pair join across the full ~1,000-occupation taxonomy. That is dropped, and dropping it
+removes a real constraint: the prefilter required the vector index to exist before edge
+derivation, forcing `007_indexes.sql` to run mid-pipeline. Without it, index creation returns
+to being the last step. Vector search remains load-bearing for A-inference (§7.1), where the
+query is genuinely one-to-many against an unknown profile.
 
-```sql
-create table edge_candidates as
-select a.occupation_id as src_id, k.occupation_id as dst_id, k.dist
-from occupations a,
-     lateral (
-       select b.occupation_id,
-              vector_distance(a.embedding, b.embedding, cosine) as dist
-       from occupations b
-       where b.occupation_id <> a.occupation_id
-       order by dist
-       fetch approx first 25 rows only
-     ) k;
-```
+If scope later widens past these three verticals, reinstate the prefilter — the threshold is
+roughly where n exceeds a few hundred.
 
-~25,000 candidate pairs instead of ~1,000,000.
-
-**Stage 2 — exact weighted skill cosine on candidates only:**
+**Exact weighted skill cosine over all pairs:**
 
 ```sql
 with norms as (
@@ -223,12 +276,13 @@ with norms as (
   group by occupation_id
 ),
 dots as (
-  select c.src_id, c.dst_id, sum(sa.importance * sb.importance) as dot
-  from edge_candidates c
-  join occupation_skills sa on sa.occupation_id = c.src_id
-  join occupation_skills sb on sb.occupation_id = c.dst_id
-                           and sb.element_id  = sa.element_id
-  group by c.src_id, c.dst_id
+  select sa.occupation_id as src_id,
+         sb.occupation_id as dst_id,
+         sum(sa.importance * sb.importance) as dot
+  from occupation_skills sa
+  join occupation_skills sb on sb.element_id = sa.element_id
+                           and sb.occupation_id <> sa.occupation_id
+  group by sa.occupation_id, sb.occupation_id
 )
 select d.src_id, d.dst_id, d.dot / (na.nrm * nb.nrm) as skill_cosine
 from dots d
@@ -258,12 +312,40 @@ answer would be one hop. Lateral moves carry a higher threshold (0.75 vs 0.65) b
 sideways move that does not raise your level has to justify itself with stronger skill
 transfer, or it is just noise in the path.
 
-`weight` = `skill_cosine`. Higher weight means a cheaper, more plausible transition.
-Traversal cost is therefore `1 - weight`.
+### 4.4 Wage penalty on edge weight
 
-Thresholds are configuration, not constants. They will need tuning against the demo
-personas, and the derivation step must be re-runnable idempotently — delete all edges where
-`source` starts with `derived_`, then re-insert.
+Job zone measures required education and experience, not pay, and the two diverge. Without a
+correction the gating will happily emit a `career_ladder` edge that steps *up* a zone while
+stepping *down* in compensation — a technically valid, practically insulting path.
+
+Base weight is `skill_cosine`; the wage penalty scales it down when the transition loses money:
+
+```
+wage_ratio = median_wage(B) / median_wage(A)        -- OEWS national, metro_id is null
+
+penalty = 1.0                        when wage_ratio >= 1.0     (no loss)
+        = 0.5 + 0.5 * wage_ratio     when wage_ratio <  1.0     (scaled loss)
+
+weight = skill_cosine * penalty
+```
+
+A 20% pay cut yields `penalty = 0.9`; a 50% cut yields `0.75`. Traversal cost remains
+`1 - weight`.
+
+This is a **penalty, not a filter**. A pay cut is sometimes exactly right when someone pivots
+into a growth field, and hard rejection would prune those legitimately. Scaling instead lets
+a strongly skill-transferable pay cut still win against a weakly-transferable raise.
+
+Where OEWS has no median for either endpoint, `penalty = 1.0` — a missing wage must not
+silently look like a pay cut. Edges therefore build correctly with or without BLS loaded,
+which keeps wage data an enrichment rather than a hard dependency.
+
+Ashby compensation is **not** used here, for the reasons in §2: advertised bands are not
+medians, the sample is doubly biased, and payloads arrive in mixed currencies.
+
+`weight` values, thresholds, and the penalty floor are configuration, not constants. They
+will need tuning against the demo personas, and the derivation step must be re-runnable
+idempotently — delete all edges where `source` starts with `derived_`, then re-insert.
 
 ---
 
@@ -650,6 +732,9 @@ measurable later.
 | Target B has zero requirements on record | `unmet` is empty, `transfer` undefined — fall back to graph cost alone (`w2 = 0`) and say so |
 | `unmet(user, B)` is empty because user already qualifies | Report "you already meet the stated requirements" rather than fabricating a path |
 | LLM extraction returns malformed output | Posting skipped, staged payload retained, counted; extraction is re-runnable |
+| OEWS has no median for one edge endpoint | `penalty = 1.0` — a missing wage must never read as a pay cut |
+| Ashby comp arrives in a non-USD currency | Displayed with its own `currencyCode`, never aggregated or converted |
+| `career_ladder` edge count near zero after derivation | Zone distribution too flat — apply the §10 item 7 contingency, do not ship an undirected graph |
 | `embedding_source` exceeds model token limit | Truncated at composition time, importance-ordered so the tail is least valuable |
 | No A→B path within 4 hops | Relax to `related`, then report nearest reachable with explanation |
 | Profile embeds to low similarity everywhere (best < 0.40) | Surface as "could not place your background" rather than guessing A |
@@ -667,6 +752,8 @@ Unit tests, no database:
 - Job-zone edge rules as a pure function: each of the four zone relations yields the right edge type or none.
 - Coverage math: `alternative_group` collapse (a Data Science major scores 1.0, not 0.33, against "DS, CS, or related"), ordinal insufficiency ("2 years" fails "3+ years" despite an exact item match), importance weighting, unmapped-only profiles.
 - `bridge_value` products: either factor at zero yields zero; both at 1.0 yields 1.0.
+- Wage penalty as a pure function: `wage_ratio >= 1.0` yields 1.0; a 20% cut yields 0.9; a 50% cut yields 0.75; a null median on either endpoint yields 1.0, never a penalty.
+- Vertical filtering: a `29-xxxx` (healthcare) SOC code is excluded at ingest; `15-1252`, `13-2051`, and `19-1029` are all admitted.
 - Requirement-type routing: `education_level` compares ordinally, `education_field` compares by embedding, `tool` compares exactly.
 
 Integration tests requiring the vocabulary:
@@ -701,3 +788,16 @@ makes it the only test that can prove the traversal semantics are actually right
    overstate tool requirements and understate credential requirements.
 6. `requirement_items` grows monotonically with no dedupe pass specified beyond the 0.80
    canonicalization floor. A synonym review step will eventually be needed.
+7. **Job-zone distribution within the three verticals is unmeasured and may break the
+   gating.** Tech, finance, and research concentrate in zones 4–5. If most occupations share a
+   zone, `career_ladder` edges (which require exactly zone+1) become sparse or vanish, leaving
+   an undirected graph of laterals. **Measure the zone histogram immediately after ingest.**
+   Contingency if `career_ladder` edge count is too low: promote wage from penalty to
+   co-direction signal — treat `B.job_zone = A.job_zone AND wage_ratio >= 1.10` as a ladder
+   edge rather than a lateral. That change is confined to §4.3's rule table.
+8. **O\*NET SOC codes do not encode seniority.** "Software Developers" is one code spanning
+   junior through principal, so within-role progression is invisible to the graph — a
+   junior-to-staff path is 15-1252 → 15-1252, which has no edges. If a demo persona needs
+   that, the graph cannot express it. Posting titles and years-of-experience requirements do
+   carry seniority and could supply a sub-occupation dimension, but that is a schema addition
+   beyond this design.
