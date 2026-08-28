@@ -24,6 +24,10 @@ EXPECTED_FILES = [
     "006_agent_tables.sql",
     "007_indexes.sql",
     "008_property_graph.sql",
+    "009_work_style_element_type.sql",
+    "010_requirements.sql",
+    "011_user_profile.sql",
+    "012_embedding_source.sql",
 ]
 
 
@@ -112,8 +116,7 @@ def test_property_graph_failure_is_logged_not_fatal(
     monkeypatch.setattr(migrations, "NOTES_PATH", notes)
     fake_pool.db.failing_substrings.append("create property graph")
     results = run_migrations(fake_pool)
-    graph_result = results[-1]
-    assert graph_result.filename == "008_property_graph.sql"
+    graph_result = next(r for r in results if r.filename == "008_property_graph.sql")
     assert graph_result.status == "applied_without_graph"
     assert "CREATE PROPERTY GRAPH failed" in notes.read_text()
 

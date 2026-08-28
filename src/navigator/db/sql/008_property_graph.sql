@@ -19,7 +19,7 @@
 declare
   l_count number;
 begin
-  select count(*) into l_count from user_pg_property_graphs
+  select count(*) into l_count from user_property_graphs
   where graph_name = 'OCCUPATION_GRAPH';
   if l_count = 0 then
     execute immediate q'[

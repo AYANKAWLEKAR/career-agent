@@ -36,7 +36,7 @@ begin
         filename   varchar2(200) primary key,
         checksum   varchar2(64) not null,
         applied_at timestamp with time zone default systimestamp not null,
-        status     varchar2(20) not null
+        status     varchar2(40) not null
       )
     ]';
   end if;
