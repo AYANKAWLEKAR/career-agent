@@ -1,8 +1,8 @@
 """O*NET Web Services client and bulk-file loader.
 
 The bulk database text files are the preferred path for the full corpus; the
-API is for spot checks. API auth is HTTP Basic with the API key as both
-username and password (or a bearer token for newer accounts).
+API is for spot checks. API auth is an ``X-API-Key`` header against the v2
+host (legacy accounts may still use a bearer token).
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import httpx
 
 from navigator.ingest.base import IngestClient, RawRecord, request_with_retry
 
-BASE_URL = "https://services.onetcenter.org/ws/"
+BASE_URL = "https://api-v2.onetcenter.org/"
 MAX_CONCURRENT_REQUESTS = 5
 
 
@@ -32,15 +32,12 @@ class OnetClient(IngestClient):
         base_url: str = BASE_URL,
         client: httpx.AsyncClient | None = None,
     ):
-        auth = None
         headers = {"Accept": "application/json"}
         if bearer_token:
             headers["Authorization"] = f"Bearer {bearer_token}"
         elif api_key:
-            auth = httpx.BasicAuth(api_key, api_key)
-        self._client = client or httpx.AsyncClient(
-            base_url=base_url, auth=auth, headers=headers
-        )
+            headers["X-API-Key"] = api_key
+        self._client = client or httpx.AsyncClient(base_url=base_url, headers=headers)
         self._semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 
     async def _get_json(self, path: str, **params: Any) -> dict[str, Any]:

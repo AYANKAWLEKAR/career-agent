@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     oci_key_file: Path | None = None
 
     # Data sources
+    onet_api_key: SecretStr | None = None
     careeronestop_user_id: str | None = None
     careeronestop_token: SecretStr | None = None
     scorecard_api_key: SecretStr | None = None
