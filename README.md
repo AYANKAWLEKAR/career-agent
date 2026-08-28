@@ -1,9 +1,9 @@
 # Career Path Navigator
 
 Career Path Navigator is an agentic career-planning system built on Oracle Autonomous AI
-Database. This repository currently contains the foundation phase: configuration, connection
-pooling, the database schema and migration runner, and ingest clients for O*NET, BLS OEWS,
-College Scorecard, and CareerOneStop.
+Database. It ingests O*NET career data, builds a directed occupation graph, infers a user's
+starting occupation from their experience, and computes concrete tool, education, and
+experience gaps against a target occupation.
 
 ## Prerequisites
 
@@ -40,6 +40,28 @@ database variables, place the wallet in the directory named by `ORACLE_TNS_ADMIN
 
 ```bash
 uv run python -m navigator.db.migrations
+```
+
+## Load requirement data
+
+After the corrected O*NET 30.3 Oracle tables and curated occupations are loaded, populate the
+shared requirement vocabulary and occupation mappings:
+
+```bash
+uv run python scripts/load_requirements.py
+```
+
+The loader is idempotent and commits tools, education, and experience independently. It also
+reports vocabulary counts and verifies that every traversable occupation has at least one hot
+technology requirement.
+
+Application code can then obtain an explainable gap report with:
+
+```python
+from navigator.requirements import coverage
+
+report = coverage(pool, profile_id=profile_id, occupation_id=target_occupation_id)
+print(report.coverage_pct, report.missing_tools, report.education_needed)
 ```
 
 ## Environment variables
