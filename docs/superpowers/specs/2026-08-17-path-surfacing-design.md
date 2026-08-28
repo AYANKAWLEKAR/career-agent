@@ -422,7 +422,9 @@ beats returning nothing.
 
 ### 6.1 Profile tables
 
-New migration `009_user_profile.sql`.
+New migration `011_user_profile.sql`. (`009` is taken by `009_work_style_element_type.sql`
+and `010` by the requirement vocabulary of 6.2, which 6.1 has a foreign key into and so
+must be created first.)
 
 ```sql
 create table user_profiles (
@@ -433,10 +435,12 @@ create table user_profiles (
   current_title         varchar2(300),
   years_experience      number(4,1),
   education_level       varchar2(50),
+  education_majors      json,
   inferred_job_zone     number constraint user_profiles_zone_ck
                         check (inferred_job_zone between 1 and 5),
   location_text         varchar2(200),
   -- matching
+  embedding_source      clob,
   embedding             vector(384, float32),
   matched_occupation_id number
                         constraint user_profiles_matched_fk
@@ -446,11 +450,29 @@ create table user_profiles (
   updated_at            timestamp with time zone default systimestamp not null
 );
 
+create table profile_experiences (
+  experience_id   number generated always as identity primary key,
+  profile_id      number not null
+                  constraint profile_exp_profile_fk
+                  references user_profiles (profile_id) on delete cascade,
+  ordinal         number not null,
+  raw_text        clob not null,
+  title           varchar2(300),
+  organization    varchar2(300),
+  duration_months number(5),
+  embedding       vector(384, float32),
+  created_at      timestamp with time zone default systimestamp not null,
+  constraint profile_exp_ordinal_uq unique (profile_id, ordinal)
+);
+
 create table profile_requirements (
   profile_requirement_id number generated always as identity primary key,
   profile_id       number not null
                    constraint profile_reqs_profile_fk
                    references user_profiles (profile_id) on delete cascade,
+  experience_id    number
+                   constraint profile_reqs_experience_fk
+                   references profile_experiences (experience_id) on delete cascade,
   requirement_id   number
                    constraint profile_reqs_item_fk
                    references requirement_items (requirement_id),
@@ -459,10 +481,31 @@ create table profile_requirements (
   ordinal_value    number,
   evidence         varchar2(500),
   source           varchar2(30) constraint profile_reqs_source_ck
-                   check (source in ('stated', 'inferred_from_title', 'inferred_from_text')),
+                   check (source in ('stated', 'inferred_from_title', 'inferred_from_text',
+                                     'inferred_from_experience')),
   created_at       timestamp with time zone default systimestamp not null
 );
 ```
+
+The user supplies their history as natural language — effectively a resume — and two
+multi-valued extractions come out of it, stored differently on purpose.
+
+`education_majors` is a JSON array of short labels. A major carries real signal ("Computer
+Science" versus "Biology" implies a different starting occupation) but majors are a handful
+of short strings, so they contribute through `embedding_source` rather than earning vectors
+of their own. They canonicalize into `education_field` requirement rows for gap math (6.2);
+the list is the stated layer those rows derive from.
+
+`profile_experiences` gives each experience its own row and its own vector. Averaging a
+resume into one profile vector lands it between all the entries and near none of them —
+someone with a web development internship, a genomics research assistantship, and calculus
+tutoring is not the average of those three. Embedding each separately lets A-inference (7.1)
+score every experience against the occupation vectors and take the strongest signal rather
+than the blurred mean. `ordinal` preserves resume order because recency is signal.
+
+Skills are deliberately not a column here: they are `profile_requirements` rows of
+`requirement_type` `'skill'`, and `experience_id` records which experience each was drawn
+from, so a surfaced skill can be traced back to the sentence that evidenced it.
 
 `raw_text` on `user_profiles` is retained permanently. Every downstream inference — the
 embedding, the matched occupation, the extracted requirements — is a lossy derivation, and
