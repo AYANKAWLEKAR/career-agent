@@ -28,6 +28,7 @@ EXPECTED_FILES = [
     "010_requirements.sql",
     "011_user_profile.sql",
     "012_embedding_source.sql",
+    "013_education_in_progress.sql",
 ]
 
 

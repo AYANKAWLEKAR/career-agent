@@ -24,3 +24,7 @@ data/
 .mypy_cache/
 .ruff_cache/
 uv.lock
+
+# Local-only personal data and OS noise
+resumetext/
+.DS_Store
