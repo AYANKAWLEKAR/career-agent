@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     scorecard_api_key: SecretStr | None = None
     bls_api_key: SecretStr | None = None
 
+    # LLM (resume parsing and path narration)
+    llm_backend: str = "ollama"  # 'ollama' (local) or 'anthropic' (Claude API)
+    ollama_model: str = "qwen3:8b"
+    ollama_base_url: str = "http://localhost:11434"
+
     # Application
     demo_mode: bool = True
     log_level: str = "INFO"
