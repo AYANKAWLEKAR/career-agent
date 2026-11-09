@@ -191,3 +191,46 @@ Smoke results: frontend bachelor's -> Computer Systems Engineers/Architects fami
 (zone-clamped up from z3); tax master's -> Tax Preparers with `zone_clamp_failed`
 logged (correct: stated education outranks every semantic match, spec says accept
 and flag); statistics PhD -> Statisticians, Data Scientists second at 0.51.
+
+## Start-zone band and aspiration mode (student-overplacement fix)
+
+The section 7.1 zone clamp was a floor with no ceiling: education implied a
+MINIMUM starting zone, nothing implied a maximum, and "bachelor's (in
+progress)" mapped to the bachelor's tier. Students therefore seeded into
+zone-5 occupations — measured live: a biology undergraduate started at
+Molecular and Cellular Biologists [z5], a communications student was clamped
+UP to Survey Researchers [z5]. Zone 5 is terminal (the graph never routes
+downward), so the product's core audience received the one output with no
+ladder in it.
+
+The fix, in `profile.py`:
+
+- **Start band.** `infer_start_band` derives [floor, ceiling] from COMPLETED
+  preparation: a degree in progress supports the tier below it
+  (`education_in_progress`, migration 013, set explicitly by the LLM parse and
+  by text markers like "expected"/"candidate"/"junior year"); four or more
+  years of experience buys one tier back, mirroring O*NET's own zone-5
+  definition ("graduate degree OR extensive experience").
+- **Selection.** `pick_start` picks the strongest candidate inside the band,
+  falls back below the floor (flagged `zone_clamp_failed`, unchanged
+  semantics), relaxes the experience gate before failing (flagged), and when
+  every candidate sits above the ceiling starts at the LOWEST zone available
+  (flagged `ceiling_unmet`) rather than the highest-similarity one.
+- **Experience gate.** The RW-derived per-occupation thresholds (requirements
+  loader, spec 2026-08-28 — now implemented: 169 tools, 12 RL + 11 RW
+  vocabulary entries, 103 occupations with education and experience
+  requirements) gate the start: unknown years or a missing threshold passes,
+  because missing data must not masquerade as ineligibility.
+- **Aspirations.** Matches strictly above the actual start's zone become
+  aspirations — destinations, not entry points — and `surface_paths_to` builds
+  the ladder from the chosen start to the top aspiration. Measured after the
+  fix: the biology student starts at Bioinformatics Technicians [z4] and gets
+  a 2-hop ladder to Molecular and Cellular Biologists [z5]; the statistics
+  student starts at Accountants and Auditors with Statisticians [z5] as the
+  aspiration.
+
+Candidate pool widened 5 -> 10 so the band has lower-zone candidates to choose
+from. RW bands are also the honest answer to "seniority": SOC codes cannot
+express within-occupation progression, but an occupation whose median
+incumbent needed 4+ prior years is a senior role regardless of zone, and the
+gate now enforces exactly that.
