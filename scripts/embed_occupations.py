@@ -70,7 +70,9 @@ def main(argv: list[str] | None = None) -> int:
     pool = create_pool(get_settings())
     with pool.acquire() as connection:
         cursor = connection.cursor()
-        cursor.callTimeout = 900_000
+        # Call timeout lives on the connection in python-oracledb; a cursor
+        # attribute of the same name is silently ignored by the driver.
+        connection.call_timeout = 900_000
 
         started = time.monotonic()
         cursor.execute(COMPOSE_SQL)

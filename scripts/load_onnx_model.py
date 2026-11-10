@@ -58,7 +58,9 @@ def main(argv: list[str] | None = None) -> int:
         started = time.monotonic()
         blob = connection.createlob(oracledb.DB_TYPE_BLOB)
         blob.write(data)
-        cursor.callTimeout = 900_000
+        # Call timeout lives on the connection in python-oracledb; a cursor
+        # attribute of the same name is silently ignored by the driver.
+        connection.call_timeout = 900_000
         cursor.execute(
             "begin dbms_vector.load_onnx_model(:name, :model_data); end;",
             name=MODEL_NAME,
