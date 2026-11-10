@@ -38,8 +38,12 @@ Verified live on the restarted instance (26ai 23.26.4.1.0, 2026-11-09):
 - [ ] Switch `paths.py` to GRAPH_TABLE as the primary traversal (hop-join SQL
       stays as fallback and per-hop detail source) — the marquee 26ai feature
       should be what the demo executes.
-- [ ] Switch A-inference candidate search to `FETCH APPROX FIRST` against the
-      existing HNSW index.
+- [ ] Make A-inference candidate search index-eligible: the current query
+      wraps vector_distance in arithmetic inside MAX with GROUP BY, which
+      disqualifies the HNSW index in every mode (silent exact fallback) —
+      restructure into per-query-vector top-K blocks, then prove it with the
+      `VECTOR INDEX HNSW SCAN` line in DBMS_XPLAN. (Research 2026-11-09:
+      this is a query restructure, not a FETCH APPROX keyword flip.)
 - [ ] Print latency and row counts in the demos so "runs inside the database"
       is demonstrated, not asserted.
 
@@ -47,7 +51,12 @@ Verified live on the restarted instance (26ai 23.26.4.1.0, 2026-11-09):
 - [ ] Populate `tasks.embedding` (~2,382 rows) via in-DB `vector_embedding()`.
 - [ ] Optionally embed the full ~1,016-occupation taxonomy for retrieval only
       (graph stays scoped to the 3 verticals).
-- [ ] Capture before/after approximate-search latency numbers for the pitch.
+- [ ] Prove approximate search honestly: DBMS_XPLAN plan line, per-query ms,
+      and `DBMS_VECTOR.INDEX_ACCURACY_QUERY` output over the 2,382-task
+      corpus. (Research 2026-11-09: before/after latency at 124 vectors is
+      noise a skeptical DBA would call out — the corpus for the APPROX story
+      is the tasks table; rebuild TASKS_EMBEDDING_VIX after embedding, as it
+      was created over all-NULL rows.)
 
 ### Phase 3 — Gap analysis in the demo (1 session)
 - [ ] LLM extracts stated tools from the resume → match into
