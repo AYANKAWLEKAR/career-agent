@@ -16,11 +16,15 @@ from navigator.llm import (
     parsed_to_profile,
 )
 from navigator.paths import (
+    MAX_HOPS,
     Hop,
     Path,
+    enumerate_paths,
     overlay_wages,
     paths_to_destination,
     rank_paths,
+    surface_paths,
+    surface_paths_to,
 )
 from navigator.profile import Candidate, MatchResult, ProfileInput
 
@@ -85,6 +89,207 @@ class TestOverlayWages:
     def test_empty_scope_is_identity(self):
         national = {1: 100_000.0}
         assert overlay_wages(national, {}) == national
+
+
+class _GraphDb:
+    """Scripted rows for the three queries enumerate_paths issues."""
+
+    def __init__(self, meta_rows: list[tuple], wage_rows: list[tuple],
+                 path_rows: list[tuple]):
+        self.meta_rows = meta_rows
+        self.wage_rows = wage_rows
+        self.path_rows = path_rows
+        self.executed: list[str] = []
+
+
+class _GraphCursor:
+    def __init__(self, db: _GraphDb):
+        self._db = db
+        self._rows: list[tuple] = []
+
+    def execute(self, sql: str, **params) -> None:
+        self._db.executed.append(sql)
+        lowered = sql.lower()
+        if "job_zone" in lowered:
+            self._rows = list(self._db.meta_rows)
+        elif "metro_wages" in lowered:
+            self._rows = list(self._db.wage_rows)
+        else:
+            self._rows = list(self._db.path_rows)
+
+    def fetchall(self) -> list[tuple]:
+        return self._rows
+
+
+class _GraphConnection:
+    def __init__(self, db: _GraphDb):
+        self._db = db
+
+    def __enter__(self) -> _GraphConnection:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        pass
+
+    def cursor(self) -> _GraphCursor:
+        return _GraphCursor(self._db)
+
+
+class _GraphPool:
+    def __init__(self, db: _GraphDb):
+        self.db = db
+
+    def acquire(self) -> _GraphConnection:
+        return _GraphConnection(self.db)
+
+
+_META_ROWS = [(10, "Start", 3), (20, "Mid", 3), (30, "High", 4), (40, "Peak", 5)]
+_WAGE_ROWS = [(10, 100_000.0), (20, 110_000.0), (30, 130_000.0)]  # 40 is unpriced
+
+HOP_JOIN_1HOP_ROW = (1, 10, 20, None, None, "career_ladder", 0.9,
+                     None, None, None, None)
+GT_1HOP_ROW = (1, 2, 10, 20, "career_ladder", 0.9)
+
+
+def _graph_pool(path_rows: list[tuple]) -> _GraphPool:
+    return _GraphPool(_GraphDb(_META_ROWS, _WAGE_ROWS, path_rows))
+
+
+def _executed_sql(pool: _GraphPool) -> str:
+    return " ".join(pool.db.executed).lower()
+
+
+class TestGraphTableRows:
+    def test_groups_noncontiguous_match_nums_into_walks(self):
+        rows = [
+            (3, 2, 10, 20, "career_ladder", 0.9),
+            (7, 2, 10, 20, "career_ladder", 0.9),
+            (7, 4, 20, 30, "skill_overlap", 0.8),
+            (12, 2, 10, 20, "career_ladder", 0.9),
+            (12, 4, 20, 30, "skill_overlap", 0.8),
+            (12, 6, 30, 40, "career_ladder", 0.7),
+        ]
+        paths = enumerate_paths(_graph_pool(rows), 10, wage_scope="national",
+                                engine="graph_table")
+        assert [len(p.hops) for p in paths] == [1, 2, 3]
+        three = paths[2]
+        assert [(h.src_title, h.dst_title) for h in three.hops] == [
+            ("Start", "Mid"), ("Mid", "High"), ("High", "Peak")]
+        assert [h.edge_type for h in three.hops] == [
+            "career_ladder", "skill_overlap", "career_ladder"]
+        assert (three.hops[1].src_zone, three.hops[1].dst_zone) == (3, 4)
+        assert three.hops[0].src_wage == 100_000.0
+        assert three.hops[1].dst_wage == 130_000.0
+        assert three.hops[2].dst_wage is None
+        assert abs(paths[1].cost - 0.3) < 1e-9
+
+    def test_hops_follow_step_num_order_not_row_order(self):
+        rows = [
+            (7, 4, 20, 30, "skill_overlap", 0.8),
+            (7, 2, 10, 20, "career_ladder", 0.9),
+        ]
+        paths = enumerate_paths(_graph_pool(rows), 10, wage_scope="national",
+                                engine="graph_table")
+        assert [h.dst_title for h in paths[0].hops] == ["Mid", "High"]
+
+
+class TestGraphTableCycleFilter:
+    def test_walks_revisiting_a_vertex_are_dropped(self):
+        rows = [
+            (1, 2, 10, 20, "career_ladder", 0.9),
+            (1, 4, 20, 10, "career_ladder", 0.9),   # Start->Mid->Start
+            (2, 2, 10, 20, "career_ladder", 0.9),
+            (2, 4, 20, 30, "skill_overlap", 0.8),
+            (2, 6, 30, 20, "skill_overlap", 0.8),   # Start->Mid->High->Mid
+            (5, 2, 10, 20, "career_ladder", 0.9),
+            (5, 4, 20, 30, "skill_overlap", 0.8),   # same walk, no repeat: kept
+        ]
+        paths = enumerate_paths(_graph_pool(rows), 10, wage_scope="national",
+                                engine="graph_table")
+        assert len(paths) == 1
+        assert [h.dst_title for h in paths[0].hops] == ["Mid", "High"]
+
+
+class TestEngineDispatch:
+    def test_hop_join_engine_runs_union_all_sql(self):
+        pool = _graph_pool([HOP_JOIN_1HOP_ROW])
+        paths = enumerate_paths(pool, 10, wage_scope="national", engine="hop_join")
+        assert "union all" in _executed_sql(pool)
+        assert "graph_table" not in _executed_sql(pool)
+        assert paths[0].hops[0].dst_title == "Mid"
+
+    def test_graph_table_engine_runs_pgq_sql(self):
+        pool = _graph_pool([GT_1HOP_ROW])
+        paths = enumerate_paths(pool, 10, wage_scope="national",
+                                engine="graph_table")
+        sql = _executed_sql(pool)
+        assert "graph_table" in sql
+        assert "one row per step" in sql
+        assert f"{{1,{MAX_HOPS}}}" in sql
+        assert "union all" not in sql
+        assert paths[0].hops[0].dst_title == "Mid"
+
+    def test_engine_none_resolves_from_settings(self, monkeypatch):
+        for engine, marker in (("graph_table", "graph_table"),
+                               ("hop_join", "union all")):
+            row = GT_1HOP_ROW if engine == "graph_table" else HOP_JOIN_1HOP_ROW
+            pool = _graph_pool([row])
+            monkeypatch.setattr(
+                "navigator.paths.get_settings",
+                lambda engine=engine: SimpleNamespace(
+                    graph_engine=engine, wage_scope="national"),
+            )
+            paths = enumerate_paths(pool, 10, wage_scope="national")
+            assert marker in _executed_sql(pool)
+            assert paths[0].hops[0].dst_title == "Mid"
+
+    def test_unknown_engine_is_rejected(self):
+        with pytest.raises(ValueError, match="graph_table"):
+            enumerate_paths(_graph_pool([]), 10, wage_scope="national",
+                            engine="dijkstra")
+
+    def test_surface_paths_threads_engine(self):
+        pool = _graph_pool([GT_1HOP_ROW])
+        ranked = surface_paths(pool, 10, wage_scope="national",
+                               engine="graph_table")
+        assert "graph_table" in _executed_sql(pool)
+        assert ranked[0].destination == "Mid"
+
+    def test_surface_paths_to_threads_engine(self):
+        pool = _graph_pool([HOP_JOIN_1HOP_ROW])
+        routes = surface_paths_to(pool, 10, "Mid", wage_scope="national",
+                                  engine="hop_join")
+        assert "union all" in _executed_sql(pool)
+        assert routes[0].destination == "Mid"
+
+
+class TestEngineEquivalence:
+    def test_same_walks_parse_to_equal_paths_under_both_engines(self):
+        gt_rows = [
+            (1, 2, 10, 20, "career_ladder", 0.9),
+            (2, 2, 10, 20, "career_ladder", 0.9),
+            (2, 4, 20, 30, "skill_overlap", 0.8),
+            (4, 2, 10, 30, "skill_overlap", 0.85),
+        ]
+        hop_rows = [
+            (1, 10, 20, None, None, "career_ladder", 0.9,
+             None, None, None, None),
+            (2, 10, 20, 30, None, "career_ladder", 0.9,
+             "skill_overlap", 0.8, None, None),
+            (1, 10, 30, None, None, "skill_overlap", 0.85,
+             None, None, None, None),
+        ]
+
+        def key(path: Path) -> tuple:
+            return (path.destination, len(path.hops), path.cost)
+
+        via_gt = sorted(
+            enumerate_paths(_graph_pool(gt_rows), 10, wage_scope="national",
+                            engine="graph_table"), key=key)
+        via_join = sorted(
+            enumerate_paths(_graph_pool(hop_rows), 10, wage_scope="national",
+                            engine="hop_join"), key=key)
+        assert via_gt == via_join
 
 
 class TestParsedToProfile:
@@ -255,3 +460,19 @@ class TestOllamaBackend:
         text, tokens_in, tokens_out = OllamaBackend(model="m").complete("sys", "user")
         assert text == "The story."
         assert (tokens_in, tokens_out) == (10, 5)
+
+
+class TestRoutingFilter:
+    """Section 4.1: related edges are excluded from routing — in BOTH engines."""
+
+    def test_both_engines_share_the_routing_filter(self):
+        from navigator.paths import _GRAPH_TABLE_SQL, _PATHS_SQL, _ROUTING_FILTER
+        assert _ROUTING_FILTER in _PATHS_SQL
+        assert _ROUTING_FILTER in _GRAPH_TABLE_SQL
+
+    def test_routing_filter_names_only_routable_edge_types(self):
+        from navigator.paths import _GRAPH_TABLE_SQL, _PATHS_SQL, _ROUTING_FILTER
+        assert "career_ladder" in _ROUTING_FILTER
+        assert "skill_overlap" in _ROUTING_FILTER
+        assert "'related'" not in _PATHS_SQL
+        assert "'related'" not in _GRAPH_TABLE_SQL

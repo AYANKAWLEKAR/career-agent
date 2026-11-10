@@ -72,3 +72,23 @@ class TestWageScope:
             Settings()
         message = str(excinfo.value)
         assert "national" in message and "alameda" in message
+
+
+class TestGraphEngine:
+    def test_defaults_to_graph_table(self, full_env):
+        assert Settings().graph_engine == "graph_table"
+
+    def test_normalizes_case_and_whitespace(self, full_env, monkeypatch):
+        monkeypatch.setenv("GRAPH_ENGINE", "  GRAPH_TABLE ")
+        assert Settings().graph_engine == "graph_table"
+
+    def test_hop_join_is_accepted(self, full_env, monkeypatch):
+        monkeypatch.setenv("GRAPH_ENGINE", "hop_join")
+        assert Settings().graph_engine == "hop_join"
+
+    def test_invalid_engine_names_the_valid_ones(self, full_env, monkeypatch):
+        monkeypatch.setenv("GRAPH_ENGINE", "dijkstra")
+        with pytest.raises(ValidationError) as excinfo:
+            Settings()
+        message = str(excinfo.value)
+        assert "graph_table" in message and "hop_join" in message

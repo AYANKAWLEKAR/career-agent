@@ -56,6 +56,11 @@ class Settings(BaseSettings):
     # (SF-Oakland-Berkeley MSA with national fallback).
     wage_scope: str = "national"
 
+    # Path traversal engine. graph_table is the ISO SQL/PGQ surface (the
+    # 26ai marquee feature); hop_join is the legacy UNION ALL formulation
+    # kept as a verified fallback.
+    graph_engine: str = "graph_table"
+
     # Application
     demo_mode: bool = True
     log_level: str = "INFO"
@@ -72,6 +77,16 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"wage_scope must be one of {sorted(valid)}, got {value!r}")
         return scope
+
+    @field_validator("graph_engine")
+    @classmethod
+    def _graph_engine_is_known(cls, value: str) -> str:
+        engine = value.strip().lower()
+        valid = {"graph_table", "hop_join"}
+        if engine not in valid:
+            raise ValueError(
+                f"graph_engine must be one of {sorted(valid)}, got {value!r}")
+        return engine
 
     @field_validator("oracle_tns_admin")
     @classmethod
