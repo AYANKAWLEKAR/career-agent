@@ -49,12 +49,29 @@ class Settings(BaseSettings):
     ollama_model: str = "qwen3:8b"
     ollama_base_url: str = "http://localhost:11434"
 
+    # Wage context surfaced on hops and in narration. The edge wage penalty
+    # in build_graph.py always uses national rows; this scopes only the
+    # DISPLAYED wages: 'national' (students in general), 'alameda'
+    # (Alameda County medians with national fallback), or 'bay'
+    # (SF-Oakland-Berkeley MSA with national fallback).
+    wage_scope: str = "national"
+
     # Application
     demo_mode: bool = True
     log_level: str = "INFO"
     pool_min: int = 1
     pool_max: int = 4
     pool_increment: int = 1
+
+    @field_validator("wage_scope")
+    @classmethod
+    def _wage_scope_is_known(cls, value: str) -> str:
+        scope = value.strip().lower()
+        valid = {"national", "bay", "alameda"}
+        if scope not in valid:
+            raise ValueError(
+                f"wage_scope must be one of {sorted(valid)}, got {value!r}")
+        return scope
 
     @field_validator("oracle_tns_admin")
     @classmethod

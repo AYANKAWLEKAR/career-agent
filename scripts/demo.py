@@ -95,6 +95,8 @@ def show_engine(pool) -> None:
         n_occ = cursor.fetchone()[0]
         cursor.execute("select count(*) from occupation_edges")
         print(f"Corpus   : {n_occ} occupations, {cursor.fetchone()[0]} edges")
+    print(f"Wages    : scope={get_settings().wage_scope} "
+          "(H-1B LCA FY2026; display only — penalty is national)")
 
 
 def run_pipeline(pool, profile: ProfileInput, label: str) -> None:
@@ -196,6 +198,7 @@ def run_resume_leg(pool, resume_path: FilePath, skip_llm: bool) -> None:
 
     print("\nLLM NARRATION (grounded in the decision record above):\n")
     narration = narrate_paths(profile, match, paths, pool=pool,
+                              wage_scope=get_settings().wage_scope,
                               aspiration_paths=aspiration_paths)
     print(narration.story)
     print(f"\n[{narration.output_tokens} output tokens, "

@@ -203,3 +203,21 @@ class TestAggregateWages:
     def test_bay_county_set_is_the_msa_definition(self):
         assert BAY_AREA_COUNTIES == {
             "ALAMEDA", "CONTRA COSTA", "MARIN", "SAN FRANCISCO", "SAN MATEO"}
+
+    def test_alameda_rows_feed_national_bay_and_alameda_segments(self):
+        rows = self._rows([100.0] * 5, county="Alameda County")
+        stats = aggregate_wages(rows, min_count=1)
+        assert stats[("15-1252", None)].count == 5
+        assert stats[("15-1252", "bay")].count == 5
+        assert stats[("15-1252", "alameda")].count == 5
+
+    def test_other_bay_counties_are_not_alameda(self):
+        rows = self._rows([100.0] * 5, county="Contra Costa County")
+        stats = aggregate_wages(rows, min_count=1)
+        assert ("15-1252", "bay") in stats
+        assert ("15-1252", "alameda") not in stats
+
+    def test_scope_region_codes_are_stable(self):
+        # The loader writes these metro_areas codes; paths.py queries by them.
+        from navigator.lca import WAGE_SCOPE_CODES
+        assert WAGE_SCOPE_CODES == {"bay": "41860", "alameda": "C06001"}

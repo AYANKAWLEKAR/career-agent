@@ -52,3 +52,23 @@ def test_repr_contains_no_secret_values(full_env):
         assert "s3cret-db-pass" not in text
         assert "s3cret-wallet-pass" not in text
     assert settings.oracle_password.get_secret_value() == "s3cret-db-pass"
+
+
+class TestWageScope:
+    def test_defaults_to_national(self, full_env):
+        assert Settings().wage_scope == "national"
+
+    def test_normalizes_case_and_whitespace(self, full_env, monkeypatch):
+        monkeypatch.setenv("WAGE_SCOPE", "  ALAMEDA ")
+        assert Settings().wage_scope == "alameda"
+
+    def test_bay_is_accepted(self, full_env, monkeypatch):
+        monkeypatch.setenv("WAGE_SCOPE", "bay")
+        assert Settings().wage_scope == "bay"
+
+    def test_invalid_scope_names_the_valid_ones(self, full_env, monkeypatch):
+        monkeypatch.setenv("WAGE_SCOPE", "berkeley")
+        with pytest.raises(ValidationError) as excinfo:
+            Settings()
+        message = str(excinfo.value)
+        assert "national" in message and "alameda" in message

@@ -192,6 +192,15 @@ def parsed_to_profile(user_ref: str, raw_text: str, parsed: ParsedResume) -> Pro
     )
 
 
+_WAGE_SCOPE_LABELS = {
+    "national": "national medians",
+    "bay": ("San Francisco-Oakland-Berkeley MSA medians where the region has "
+            "enough filings, national medians otherwise"),
+    "alameda": ("Alameda County, CA medians where the county has enough "
+                "filings, national medians otherwise"),
+}
+
+
 def _hop_wages(hop) -> dict:
     """Wage fields for a hop dict — present only when BOTH ends are priced.
 
@@ -210,6 +219,7 @@ def _hop_wages(hop) -> dict:
 def build_narration_context(
     profile: ProfileInput, match: MatchResult, paths: list[Path],
     aspiration_paths: list[Path] | None = None,
+    wage_scope: str = "national",
 ) -> dict:
     """Assemble the decision record the narration is grounded in.
 
@@ -307,8 +317,10 @@ def build_narration_context(
             "cost": "path cost = sum of (1 - weight); lower is stronger",
             "wages": (
                 "median offered base salary from certified full-time H-1B LCA "
-                "filings (DOL, FY2026); hops without wage fields have no "
-                "wage data for one of the two occupations"
+                f"filings (DOL, FY2026): "
+                f"{_WAGE_SCOPE_LABELS.get(wage_scope, _WAGE_SCOPE_LABELS['national'])}; "
+                "hops without wage fields have no wage data for one of the "
+                "two occupations"
             ),
         },
     }
@@ -464,10 +476,12 @@ def narrate_paths(
     thread_id: str = "resume-intake",
     backend=None,
     aspiration_paths: list[Path] | None = None,
+    wage_scope: str = "national",
 ) -> NarrationResult:
     """Turn the decision record into a grounded story (call_type llm_compose)."""
     backend = backend or default_backend()
-    context = build_narration_context(profile, match, paths, aspiration_paths)
+    context = build_narration_context(
+        profile, match, paths, aspiration_paths, wage_scope=wage_scope)
     user_message = (
         "Here is the decision record. Explain it to me as a story:\n\n"
         + json.dumps(context, indent=2)

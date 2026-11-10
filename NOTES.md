@@ -273,3 +273,15 @@ Most-penalized edge: Financial Managers ($203k) -> Credit Counselors
 ($57.6k), weight 0.355. Hops now surface `median_wage_from/to/wage_delta`
 in the narration context (keys absent when either end is unpriced, so small
 models cannot read null as "zero pay") and `+$Nk` tags in the demo output.
+
+### Wage scope setting (same day)
+
+`WAGE_SCOPE` (national | bay | alameda, default national) scopes the
+DISPLAYED wages only — hop tags and narration context — via per-occupation
+fallback to national where a region is thin. The edge penalty always uses
+national rows so the graph serves students in general, not just Berkeley.
+Loaded segments: 116 national / 75 bay / 63 alameda occupation rows.
+Measured contrast: Software Developers $145,018 national vs $187,574
+Alameda (+29%); Financial and Investment Analysts -10% locally. Same hop,
+two stories: Computer Programmers -> Software Developers is +$50k
+nationally, +$80k in Alameda County.

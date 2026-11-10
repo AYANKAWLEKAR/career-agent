@@ -32,6 +32,11 @@ WAGE_CEILING = 1_500_000.0
 # San Francisco-Oakland-Berkeley, CA MSA (CBSA 41860) counties.
 BAY_AREA_COUNTIES = {"ALAMEDA", "CONTRA COSTA", "MARIN", "SAN FRANCISCO", "SAN MATEO"}
 
+# metro_areas.msa_code values the loader writes and paths.py queries, keyed
+# by the WAGE_SCOPE setting value. 41860 is the real CBSA; Alameda County is
+# not an MSA, so it gets a FIPS-derived synthetic code.
+WAGE_SCOPE_CODES = {"bay": "41860", "alameda": "C06001"}
+
 # A FROM rate above this under a sub-annual unit is an annual salary filed
 # under the wrong unit (profiled: "$55,000/Month" math teacher -> $660k/yr).
 # Hour is exempt: $240-356/hr physician comp is real.
@@ -157,13 +162,20 @@ def is_bay_area(row: dict) -> bool:
     return state == "CA" and county in BAY_AREA_COUNTIES
 
 
+def is_alameda(row: dict) -> bool:
+    county = _normalize_county(row.get("WORKSITE_COUNTY"))
+    state = str(row.get("WORKSITE_STATE") or "").strip().upper()
+    return state == "CA" and county == "ALAMEDA"
+
+
 def aggregate_wages(
     rows: list[dict], min_count: int = 5
 ) -> dict[tuple[str, str | None], WageStats]:
     """Aggregate annualized wages into (soc6, segment) -> WageStats.
 
     Segment None is national (every row); segment 'bay' is the SF-Oakland-
-    Berkeley MSA subset. Cells with fewer than ``min_count`` filings are
+    Berkeley MSA subset; segment 'alameda' is Alameda County alone (Berkeley
+    and Oakland worksites). Cells with fewer than ``min_count`` filings are
     dropped — a median over a handful of filings is noise, not a statistic.
     """
     buckets: dict[tuple[str, str | None], list[float]] = {}
@@ -175,6 +187,8 @@ def aggregate_wages(
         buckets.setdefault((code, None), []).append(wage)
         if is_bay_area(row):
             buckets.setdefault((code, "bay"), []).append(wage)
+        if is_alameda(row):
+            buckets.setdefault((code, "alameda"), []).append(wage)
     return {
         key: _stats(wages)
         for key, wages in buckets.items()

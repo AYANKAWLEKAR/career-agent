@@ -15,7 +15,13 @@ from navigator.llm import (
     parse_resume,
     parsed_to_profile,
 )
-from navigator.paths import Hop, Path, paths_to_destination, rank_paths
+from navigator.paths import (
+    Hop,
+    Path,
+    overlay_wages,
+    paths_to_destination,
+    rank_paths,
+)
 from navigator.profile import Candidate, MatchResult, ProfileInput
 
 
@@ -65,6 +71,20 @@ class TestPathsToDestination:
 
     def test_no_route_returns_empty(self):
         assert paths_to_destination([Path(hops=[_hop("A", 0.5)])], "B") == []
+
+
+class TestOverlayWages:
+    def test_scoped_rows_win_and_national_fills_gaps(self):
+        national = {1: 100_000.0, 2: 90_000.0, 3: 80_000.0}
+        alameda = {1: 135_000.0}
+        merged = overlay_wages(national, alameda)
+        assert merged == {1: 135_000.0, 2: 90_000.0, 3: 80_000.0}
+        # inputs are not mutated
+        assert national[1] == 100_000.0
+
+    def test_empty_scope_is_identity(self):
+        national = {1: 100_000.0}
+        assert overlay_wages(national, {}) == national
 
 
 class TestParsedToProfile:
@@ -166,6 +186,16 @@ class TestNarrationContext:
         # misread as "zero pay" — the keys are simply absent.
         assert "wage_delta" not in unpriced and "median_wage_from" not in unpriced
         assert "wages" in context["methodology_notes"]
+
+    def test_wage_methodology_note_names_the_scope(self):
+        profile = ProfileInput(user_ref="u", raw_text="r")
+        paths = [Path(hops=[_hop("A", 0.8)])]
+        default = build_narration_context(profile, self._match(), paths)
+        assert "national" in default["methodology_notes"]["wages"]
+        county = build_narration_context(
+            profile, self._match(), paths, wage_scope="alameda")
+        assert "Alameda County" in county["methodology_notes"]["wages"]
+        assert "national" in county["methodology_notes"]["wages"]  # fallback named
 
 
 class TestAnthropicBackend:

@@ -39,10 +39,13 @@ from navigator.lca import (
 )
 
 DEFAULT_CSV = Path.home() / "Downloads" / "lca_data" / "lca_fy2026_q3_slim.csv"
-MSA_CODE = "41860"
-MSA_NAME = "San Francisco-Oakland-Berkeley, CA"
-# Approximate MSA centroid (Oakland): good enough for radius demos.
-MSA_LON, MSA_LAT = -122.27, 37.80
+# segment name -> (metro_areas.msa_code, display name, lon, lat).
+# Codes must match navigator.lca.WAGE_SCOPE_CODES, which paths.py queries.
+# Centroids are approximate (Oakland / Berkeley): good enough for radius demos.
+REGIONS = {
+    "bay": ("41860", "San Francisco-Oakland-Berkeley, CA", -122.27, 37.80),
+    "alameda": ("C06001", "Alameda County, CA", -122.27, 37.87),
+}
 
 
 def read_rows(csv_path: Path) -> list[dict]:
@@ -82,8 +85,8 @@ def read_rows(csv_path: Path) -> list[dict]:
     return rows
 
 
-def ensure_metro(cursor) -> int:
-    cursor.execute("select metro_id from metro_areas where msa_code = :c", c=MSA_CODE)
+def ensure_region(cursor, code: str, name: str, lon: float, lat: float) -> int:
+    cursor.execute("select metro_id from metro_areas where msa_code = :c", c=code)
     row = cursor.fetchone()
     if row:
         return row[0]
@@ -96,8 +99,7 @@ def ensure_metro(cursor) -> int:
                              sdo_point_type(:lon, :lat, null), null, null))
         returning metro_id into :out
         """,
-        code=MSA_CODE, name=MSA_NAME, states='["CA"]',
-        lon=MSA_LON, lat=MSA_LAT, out=out,
+        code=code, name=name, states='["CA"]', lon=lon, lat=lat, out=out,
     )
     return out.getvalue()[0]
 
@@ -105,19 +107,28 @@ def ensure_metro(cursor) -> int:
 def load(csv_path: Path, data_year: int, min_count: int) -> None:
     stats = aggregate_wages(read_rows(csv_path), min_count=min_count)
     national = {k[0]: v for k, v in stats.items() if k[1] is None}
-    bay = {k[0]: v for k, v in stats.items() if k[1] == "bay"}
-    print(f"aggregates: {len(national)} national SOCs, {len(bay)} bay SOCs "
-          f"(min_count={min_count})")
-    if national and not bay:
-        # The county filter silently matching nothing is exactly the failure
-        # the FY2026 profiling caught; never load a half-empty year quietly.
-        raise RuntimeError(
-            "bay segment is empty while national is not - county filter broke")
+    scoped = {
+        segment: {k[0]: v for k, v in stats.items() if k[1] == segment}
+        for segment in REGIONS
+    }
+    print(f"aggregates: {len(national)} national SOCs, "
+          + ", ".join(f"{len(cells)} {seg}" for seg, cells in scoped.items())
+          + f" (min_count={min_count})")
+    for segment, cells in scoped.items():
+        if national and not cells:
+            # A county filter silently matching nothing is exactly the failure
+            # the FY2026 profiling caught; never load a half-empty year quietly.
+            raise RuntimeError(
+                f"{segment} segment is empty while national is not - "
+                "county filter broke")
 
     pool = create_pool(get_settings())
     with pool.acquire() as connection:
         cursor = connection.cursor()
-        metro_id = ensure_metro(cursor)
+        region_ids = {
+            segment: ensure_region(cursor, *REGIONS[segment])
+            for segment in REGIONS
+        }
 
         cursor.execute("select occupation_id, soc_code, title from occupations")
         occ_rows = cursor.fetchall()
@@ -130,8 +141,11 @@ def load(csv_path: Path, data_year: int, min_count: int) -> None:
 
         inserts = []
         covered: set[int] = set()
-        for segment, metro, cells in (("national", None, national),
-                                      ("bay", metro_id, bay)):
+        segments = [("national", None, national)] + [
+            (segment, region_ids[segment], cells)
+            for segment, cells in scoped.items()
+        ]
+        for segment, metro, cells in segments:
             hit = 0
             for code, cell in cells.items():
                 for occupation_id in by_soc6.get(code, ()):

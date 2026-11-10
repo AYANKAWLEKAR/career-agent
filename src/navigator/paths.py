@@ -13,6 +13,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from navigator.config import get_settings
+from navigator.lca import WAGE_SCOPE_CODES
+
 MAX_HOPS = 3
 DEFAULT_TOP_K = 5
 
@@ -115,7 +118,44 @@ def paths_to_destination(
     return sorted(hits, key=lambda p: p.cost)[:top_k]
 
 
-def enumerate_paths(pool, start_occupation_id: int) -> list[Path]:
+def overlay_wages(
+    national: dict[int, float], scoped: dict[int, float]
+) -> dict[int, float]:
+    """Scoped medians where they exist, national everywhere else.
+
+    Per-occupation fallback keeps hop wage tags present even where a county
+    has too few filings; the narration's methodology note names the mix.
+    """
+    return {**national, **scoped}
+
+
+def _wage_map(cursor, wage_scope: str) -> dict[int, float]:
+    cursor.execute(
+        """
+        select occupation_id, wage_median from metro_wages
+        where metro_id is null
+        """
+    )
+    national = {int(o): float(w) for o, w in cursor.fetchall() if w is not None}
+    code = WAGE_SCOPE_CODES.get(wage_scope)
+    if code is None:
+        return national
+    cursor.execute(
+        """
+        select w.occupation_id, w.wage_median
+        from metro_wages w
+        join metro_areas m on m.metro_id = w.metro_id
+        where m.msa_code = :code
+        """,
+        code=code,
+    )
+    scoped = {int(o): float(w) for o, w in cursor.fetchall() if w is not None}
+    return overlay_wages(national, scoped)
+
+
+def enumerate_paths(
+    pool, start_occupation_id: int, wage_scope: str | None = None
+) -> list[Path]:
     """Every path out of one occupation up to MAX_HOPS, unranked and undeduped.
 
     The ranked surface (``surface_paths``) and destination mode
@@ -128,13 +168,9 @@ def enumerate_paths(pool, start_occupation_id: int) -> list[Path]:
             "select occupation_id, title, job_zone from occupations"
         )
         meta = {int(oid): (title, zone) for oid, title, zone in cursor.fetchall()}
-        cursor.execute(
-            """
-            select occupation_id, wage_median from metro_wages
-            where metro_id is null
-            """
-        )
-        wages = {int(oid): float(w) for oid, w in cursor.fetchall() if w is not None}
+        if wage_scope is None:
+            wage_scope = get_settings().wage_scope
+        wages = _wage_map(cursor, wage_scope)
         cursor.execute(_PATHS_SQL, start_id=start_occupation_id)
         paths: list[Path] = []
         for row in cursor.fetchall():
@@ -160,16 +196,20 @@ def enumerate_paths(pool, start_occupation_id: int) -> list[Path]:
     return paths
 
 
-def surface_paths(pool, start_occupation_id: int, top_k: int = DEFAULT_TOP_K) -> list[Path]:
+def surface_paths(
+    pool, start_occupation_id: int, top_k: int = DEFAULT_TOP_K,
+    wage_scope: str | None = None,
+) -> list[Path]:
     """Return the ranked weighted paths out of one occupation, up to MAX_HOPS."""
-    return rank_paths(enumerate_paths(pool, start_occupation_id), top_k)
+    return rank_paths(enumerate_paths(pool, start_occupation_id, wage_scope), top_k)
 
 
 def surface_paths_to(
     pool, start_occupation_id: int, destination_title: str,
-    top_k: int = DEFAULT_TOP_K,
+    top_k: int = DEFAULT_TOP_K, wage_scope: str | None = None,
 ) -> list[Path]:
     """The cheapest routes from a start to one named destination."""
     return paths_to_destination(
-        enumerate_paths(pool, start_occupation_id), destination_title, top_k
+        enumerate_paths(pool, start_occupation_id, wage_scope),
+        destination_title, top_k,
     )
