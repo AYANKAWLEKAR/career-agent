@@ -3,8 +3,9 @@
 Design sections 6.1 (profile tables) and 7.1 (A-inference). The user describes what
 they have done in natural language -- effectively a resume. The profile and each
 experience are embedded separately with the in-database ONNX model, and A-inference
-scores every occupation against ALL of those vectors, taking the strongest signal:
-averaging a resume into one vector lands it between all its entries and near none.
+searches the occupation vector index with EACH of those vectors, taking the
+strongest signal per occupation: averaging a resume into one vector lands it
+between all its entries and near none.
 
 The matched occupation is cached on the profile row so a wrong A is visible and
 correctable rather than buried in an ephemeral call, and the top-5 candidates are
@@ -16,6 +17,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field
+from typing import Any
 
 MODEL_NAME = "ALL_MINILM_L12_V2"
 # Ten candidates, not five: student profiles often match zone-5 occupations
@@ -363,8 +365,9 @@ def create_profile(pool, profile: ProfileInput) -> int:
 def infer_start(pool, profile_id: int, thread_id: str | None = None) -> MatchResult:
     """A-inference: match the profile into the graph and cache the result.
 
-    Every occupation is scored against the profile vector AND each experience
-    vector; the best similarity wins. The start is chosen inside the zone band
+    Candidates come from one approximate nearest-neighbor search per query
+    vector (profile AND each experience); per occupation, the best weighted
+    similarity wins. The start is chosen inside the zone band
     the person's COMPLETED preparation supports, gated by each occupation's
     experience requirement where one is loaded; stronger matches above the
     ceiling become aspirations (destinations), never starts. Everything is
@@ -393,36 +396,68 @@ def infer_start(pool, profile_id: int, thread_id: str | None = None) -> MatchRes
             float(years) if years is not None else None,
         )
 
-        # job_zone is not null excludes the "All Other" catch-all codes: they have
-        # no zone and no edges, so matching a user into one strands them with no
-        # paths. A must be a real graph entry point.
         cursor.execute(
             """
-            select o.occupation_id, o.soc_code, o.title, o.job_zone,
-                   max((1 - vector_distance(o.embedding, v.emb, cosine)) * v.wt) as sim
-            from occupations o
-            cross join (
-              select embedding as emb, 1.0 as wt from user_profiles
-              where profile_id = :pid and embedding is not null
-              union all
-              select embedding, greatest(:floor, 1 - :decay * ordinal)
-              from profile_experiences
-              where profile_id = :pid and embedding is not null
-            ) v
-            where o.embedding is not null
-              and o.job_zone is not null
-            group by o.occupation_id, o.soc_code, o.title, o.job_zone
-            order by sim desc
-            fetch first :n rows only
+            select embedding from user_profiles
+            where profile_id = :pid and embedding is not null
             """,
             pid=profile_id,
-            floor=RECENCY_FLOOR,
-            decay=RECENCY_DECAY,
-            n=TOP_CANDIDATES,
+        )
+        vectors: list[tuple[Any, float]] = [(row[0], 1.0) for row in cursor.fetchall()]
+        cursor.execute(
+            """
+            select ordinal, embedding from profile_experiences
+            where profile_id = :pid and embedding is not null
+            """,
+            pid=profile_id,
+        )
+        vectors.extend(
+            (emb, max(RECENCY_FLOOR, 1.0 - RECENCY_DECAY * float(ordinal)))
+            for ordinal, emb in cursor.fetchall()
+        )
+        if not vectors:
+            raise ValueError(f"profile {profile_id} has no embeddings to match")
+
+        # Null-zone occupations (the "All Other" catch-all codes: no zone, no
+        # edges, so a match strands the user) are filtered in Python, not SQL:
+        # ANY WHERE clause on the candidate query disqualifies
+        # OCCUPATIONS_EMBEDDING_VIX and flips the plan back to a full scan
+        # (verified live 2026-11-10). k is padded by the null-zone row count so
+        # the post-fetch filter cannot shrink the real top-TOP_CANDIDATES.
+        cursor.execute("select count(*) from occupations where job_zone is null")
+        fetch_k = TOP_CANDIDATES + int(cursor.fetchone()[0])
+
+        # Within one vector, ordering by distance equals ordering by
+        # (1 - dist) * wt (wt is constant per vector), so the union of the
+        # per-vector approximate top-k contains the global top-TOP_CANDIDATES
+        # by max-score.
+        best: dict[int, tuple[float, Any, Any, Any]] = {}
+        for emb, wt in vectors:
+            cursor.execute(
+                """
+                select occupation_id, soc_code, title, job_zone,
+                       vector_distance(embedding, :qv, cosine) as dist
+                from occupations
+                order by vector_distance(embedding, :qv, cosine)
+                fetch approx first :k rows only
+                """,
+                qv=emb,
+                k=fetch_k,
+            )
+            for oid, soc, title, zone, dist in cursor.fetchall():
+                if dist is None:
+                    continue
+                sim = (1 - float(dist)) * wt
+                key = int(oid)
+                if key not in best or sim > best[key][0]:
+                    best[key] = (sim, soc, title, zone)
+        ranked = sorted(
+            ((oid, row) for oid, row in best.items() if row[3] is not None),
+            key=lambda item: (-item[1][0], item[0]),
         )
         candidates = [
-            Candidate(int(oid), soc, title, zone, round(float(sim), 4))
-            for oid, soc, title, zone, sim in cursor.fetchall()
+            Candidate(oid, soc, title, zone, round(float(sim), 4))
+            for oid, (sim, soc, title, zone) in ranked[:TOP_CANDIDATES]
         ]
         if not candidates:
             raise ValueError(f"profile {profile_id} has no embeddings to match")
@@ -467,7 +502,9 @@ def infer_start(pool, profile_id: int, thread_id: str | None = None) -> MatchRes
                 {"profile_id": profile_id, "inferred_job_zone": inferred_zone,
                  "education_in_progress": in_progress_flag == "Y",
                  "years_experience": float(years) if years is not None else None,
-                 "start_floor": floor_zone, "start_ceiling": ceiling_zone}
+                 "start_floor": floor_zone, "start_ceiling": ceiling_zone,
+                 "approx": True, "fetch_k": fetch_k,
+                 "query_vectors": len(vectors)}
             ),
             outputs=json.dumps(
                 {

@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from navigator.profile import (
+    MODEL_NAME,
+    TOP_CANDIDATES,
     Candidate,
     ExperienceInput,
     ProfileInput,
     compose_embedding_source,
     education_looks_in_progress,
     infer_job_zone,
+    infer_start,
     infer_start_band,
     pick_start,
 )
@@ -232,3 +237,185 @@ class TestPickStart:
         assert d.choice.occupation_id == 9
         assert len(d.aspirations) == 3
         assert d.choice.occupation_id not in {a.occupation_id for a in d.aspirations}
+
+
+def _norm(sql: str) -> str:
+    return " ".join(sql.split()).lower()
+
+
+class _InferDb:
+    """Scriptable rows for each statement in the infer_start conversation.
+
+    Vectors are plain strings standing in for the array.array the driver
+    returns; the code binds them back opaquely, so any hashable value works.
+    """
+
+    def __init__(self) -> None:
+        self.profile_row: tuple | None = (4, "N", None)
+        self.profile_vector_rows: list[tuple] = [("pv",)]
+        self.experience_vector_rows: list[tuple] = []
+        self.null_zone_count = 0
+        self.candidate_rows: dict[str, list[tuple]] = {}
+        self.executed: list[tuple[str, dict]] = []
+        self.commits = 0
+
+
+class _InferCursor:
+    def __init__(self, db: _InferDb) -> None:
+        self._db = db
+        self._rows: list[tuple] = []
+
+    def execute(self, sql: str, **binds) -> None:
+        self._db.executed.append((sql, binds))
+        norm = _norm(sql)
+        if norm.startswith("select inferred_job_zone"):
+            self._rows = [self._db.profile_row] if self._db.profile_row else []
+        elif norm.startswith("select embedding from user_profiles"):
+            self._rows = list(self._db.profile_vector_rows)
+        elif norm.startswith("select ordinal, embedding from profile_experiences"):
+            self._rows = list(self._db.experience_vector_rows)
+        elif norm.startswith("select count(*) from occupations"):
+            self._rows = [(self._db.null_zone_count,)]
+        elif "vector_distance" in norm:
+            self._rows = list(self._db.candidate_rows.get(binds["qv"], []))
+        else:
+            self._rows = []
+
+    def fetchall(self) -> list[tuple]:
+        return self._rows
+
+    def fetchone(self) -> tuple | None:
+        return self._rows[0] if self._rows else None
+
+
+class _InferConnection:
+    def __init__(self, db: _InferDb) -> None:
+        self._db = db
+
+    def __enter__(self) -> _InferConnection:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        pass
+
+    def cursor(self) -> _InferCursor:
+        return _InferCursor(self._db)
+
+    def commit(self) -> None:
+        self._db.commits += 1
+
+
+class _InferPool:
+    def __init__(self, db: _InferDb) -> None:
+        self.db = db
+        self._connection = _InferConnection(db)
+
+    def acquire(self) -> _InferConnection:
+        return self._connection
+
+
+def _occ(oid: int, zone: int | None, dist: float | None) -> tuple:
+    return (oid, f"15-{oid:04d}.00", f"Occ {oid}", zone, dist)
+
+
+def _run(db: _InferDb):
+    return infer_start(_InferPool(db), 1)
+
+
+def _candidate_queries(db: _InferDb) -> list[tuple[str, dict]]:
+    return [(sql, binds) for sql, binds in db.executed if "vector_distance" in _norm(sql)]
+
+
+class TestInferStart:
+    def test_best_similarity_per_occupation_wins_across_vectors(self):
+        # Profile vector at wt 1.0; experience ordinal 0 -> wt 1.0, ordinal 7
+        # decays past the floor -> wt 0.5. Occupation 104's None distance is
+        # skipped rather than scored.
+        db = _InferDb()
+        db.experience_vector_rows = [(0, "e0"), (7, "e7")]
+        db.candidate_rows = {
+            "pv": [_occ(101, 4, 0.287655), _occ(102, 4, 0.6)],
+            "e0": [_occ(102, 4, 0.1), _occ(101, 4, 0.5), _occ(104, 4, None)],
+            "e7": [_occ(103, 4, 0.0)],
+        }
+        result = _run(db)
+        assert [c.occupation_id for c in result.candidates] == [102, 101, 103]
+        assert [c.similarity for c in result.candidates] == [0.9, 0.7123, 0.5]
+        assert result.matched.occupation_id == 102
+        queries = _candidate_queries(db)
+        assert [binds["qv"] for _, binds in queries] == ["pv", "e0", "e7"]
+        assert all(binds["k"] == TOP_CANDIDATES for _, binds in queries)
+
+    def test_null_zone_rows_dropped_without_displacing_real_candidates(self):
+        # Two null-zone rows outrank every real one; the padded k must leave
+        # room so all TOP_CANDIDATES real occupations survive the drop.
+        db = _InferDb()
+        db.null_zone_count = 2
+        real = [_occ(i, 4, 0.03 + i * 0.01) for i in range(1, TOP_CANDIDATES + 1)]
+        db.candidate_rows = {"pv": [_occ(900, None, 0.01), _occ(901, None, 0.02), *real]}
+        result = _run(db)
+        assert [c.occupation_id for c in result.candidates] == list(
+            range(1, TOP_CANDIDATES + 1)
+        )
+        assert all(c.job_zone is not None for c in result.candidates)
+        ((_, binds),) = _candidate_queries(db)
+        assert binds["k"] == TOP_CANDIDATES + 2
+
+    def test_equal_similarity_breaks_ties_by_occupation_id(self):
+        db = _InferDb()
+        db.candidate_rows = {"pv": [_occ(7, 4, 0.4), _occ(3, 4, 0.4), _occ(1, 4, 0.2)]}
+        result = _run(db)
+        assert [c.occupation_id for c in result.candidates] == [1, 3, 7]
+
+    def test_no_vectors_raises_the_existing_error(self):
+        db = _InferDb()
+        db.profile_vector_rows = []
+        db.experience_vector_rows = []
+        with pytest.raises(ValueError, match="profile 1 has no embeddings to match"):
+            _run(db)
+        assert _candidate_queries(db) == []
+
+    def test_candidate_sql_is_approx_ann_shape_with_no_where_clause(self):
+        db = _InferDb()
+        db.candidate_rows = {"pv": [_occ(1, 4, 0.2)]}
+        _run(db)
+        ((sql, binds),) = _candidate_queries(db)
+        norm = _norm(sql)
+        assert "fetch approx first :k rows only" in norm
+        assert "where" not in norm.split("order by")[0]
+        assert set(binds) == {"qv", "k"}
+
+    def test_tool_log_insert_carries_enriched_inputs(self):
+        db = _InferDb()
+        db.experience_vector_rows = [(0, "e0")]
+        db.null_zone_count = 3
+        db.candidate_rows = {"pv": [_occ(1, 4, 0.2)], "e0": [_occ(2, 4, 0.3)]}
+        result = _run(db)
+        inserts = [
+            (sql, binds) for sql, binds in db.executed
+            if _norm(sql).startswith("insert into tool_log")
+        ]
+        assert len(inserts) == 1
+        _, binds = inserts[0]
+        inputs = json.loads(binds["inputs"])
+        assert inputs["approx"] is True
+        assert inputs["fetch_k"] == TOP_CANDIDATES + 3
+        assert inputs["query_vectors"] == 2
+        assert inputs["profile_id"] == 1
+        assert inputs["inferred_job_zone"] == 4
+        assert inputs["education_in_progress"] is False
+        assert inputs["years_experience"] is None
+        assert inputs["start_floor"] == 4 and inputs["start_ceiling"] == 4
+        outputs = json.loads(binds["outputs"])
+        assert outputs["matched_soc"] == result.matched.soc_code
+        assert [c["soc"] for c in outputs["candidates"]] == [
+            c.soc_code for c in result.candidates
+        ]
+        assert set(outputs["candidates"][0]) == {"soc", "title", "zone", "sim"}
+        assert binds["model"] == MODEL_NAME
+        updates = [
+            sql for sql, _ in db.executed
+            if _norm(sql).startswith("update user_profiles set matched_occupation_id")
+        ]
+        assert len(updates) == 1
+        assert db.commits == 1
