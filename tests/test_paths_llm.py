@@ -19,11 +19,21 @@ from navigator.paths import Hop, Path, paths_to_destination, rank_paths
 from navigator.profile import Candidate, MatchResult, ProfileInput
 
 
-def _hop(dst: str, weight: float, edge_type: str = "career_ladder") -> Hop:
+def _hop(dst: str, weight: float, edge_type: str = "career_ladder",
+         src_wage: float | None = None, dst_wage: float | None = None) -> Hop:
     return Hop(
         src_title="Src", dst_title=dst, src_zone=3, dst_zone=4,
         edge_type=edge_type, weight=weight,
+        src_wage=src_wage, dst_wage=dst_wage,
     )
+
+
+class TestHopWages:
+    def test_wage_delta_requires_both_ends(self):
+        assert _hop("A", 0.8).wage_delta is None
+        assert _hop("A", 0.8, src_wage=100_000.0).wage_delta is None
+        assert _hop("A", 0.8, src_wage=100_000.0,
+                    dst_wage=121_500.0).wage_delta == 21_500.0
 
 
 class TestRankPaths:
@@ -140,6 +150,22 @@ class TestNarrationContext:
         paths = [Path(hops=[_hop("Peers", 0.8, edge_type="skill_overlap")])]
         context = build_narration_context(profile, self._match(), paths)
         assert context["surfaced_paths"][0]["hops"][0]["move"] == "lateral"
+
+    def test_hop_wages_surface_only_when_both_ends_priced(self):
+        profile = ProfileInput(user_ref="u", raw_text="r")
+        paths = [Path(hops=[
+            _hop("Priced", 0.8, src_wage=110_000.0, dst_wage=132_000.0),
+            _hop("Unpriced", 0.7),
+        ])]
+        context = build_narration_context(profile, self._match(), paths)
+        priced, unpriced = context["surfaced_paths"][0]["hops"]
+        assert priced["median_wage_from"] == 110_000.0
+        assert priced["median_wage_to"] == 132_000.0
+        assert priced["wage_delta"] == 22_000.0
+        # A hop without wages must not carry null wage keys the model could
+        # misread as "zero pay" — the keys are simply absent.
+        assert "wage_delta" not in unpriced and "median_wage_from" not in unpriced
+        assert "wages" in context["methodology_notes"]
 
 
 class TestAnthropicBackend:

@@ -192,6 +192,21 @@ def parsed_to_profile(user_ref: str, raw_text: str, parsed: ParsedResume) -> Pro
     )
 
 
+def _hop_wages(hop) -> dict:
+    """Wage fields for a hop dict — present only when BOTH ends are priced.
+
+    Null wage keys read as "zero pay" to small narration models, so hops
+    without data simply omit the keys.
+    """
+    if hop.wage_delta is None:
+        return {}
+    return {
+        "median_wage_from": hop.src_wage,
+        "median_wage_to": hop.dst_wage,
+        "wage_delta": round(hop.wage_delta, 2),
+    }
+
+
 def build_narration_context(
     profile: ProfileInput, match: MatchResult, paths: list[Path],
     aspiration_paths: list[Path] | None = None,
@@ -252,6 +267,7 @@ def build_narration_context(
                             "move": "up one zone"
                             if hop.edge_type == "career_ladder" else "lateral",
                             "skill_transfer_weight": round(hop.weight, 3),
+                            **_hop_wages(hop),
                         }
                         for hop in path.hops
                     ],
@@ -273,6 +289,7 @@ def build_narration_context(
                         "from_zone": hop.src_zone,
                         "to_zone": hop.dst_zone,
                         "skill_transfer_weight": round(hop.weight, 3),
+                        **_hop_wages(hop),
                     }
                     for hop in path.hops
                 ],
@@ -288,6 +305,11 @@ def build_narration_context(
             "zones": "O*NET job zones 1-5 measure required preparation",
             "thresholds": "up-one-zone hops need weight >= 0.30; lateral >= 0.45",
             "cost": "path cost = sum of (1 - weight); lower is stronger",
+            "wages": (
+                "median offered base salary from certified full-time H-1B LCA "
+                "filings (DOL, FY2026); hops without wage fields have no "
+                "wage data for one of the two occupations"
+            ),
         },
     }
 

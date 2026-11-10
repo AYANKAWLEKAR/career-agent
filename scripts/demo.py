@@ -26,6 +26,14 @@ from navigator.profile import ExperienceInput, ProfileInput, create_profile, inf
 
 RULE = "=" * 74
 
+
+def _wage_tag(hop) -> str:
+    """' +$21k' when both hop ends have LCA wage medians, else ''."""
+    delta = hop.wage_delta
+    if delta is None:
+        return ""
+    return f" {'+' if delta >= 0 else '-'}${abs(delta) / 1000:.0f}k"
+
 PERSONAS = [
     ProfileInput(
         user_ref="demo-frontend@example.com",
@@ -117,7 +125,7 @@ def run_pipeline(pool, profile: ProfileInput, label: str) -> None:
     for path in paths:
         chain = " -> ".join(
             f"{hop.dst_title} [{'UP' if hop.edge_type == 'career_ladder' else 'LAT'} "
-            f"w={hop.weight:.3f}]"
+            f"w={hop.weight:.3f}{_wage_tag(hop)}]"
             for hop in path.hops
         )
         print(f"  cost {path.cost:.3f}: {path.hops[0].src_title} -> {chain}")
@@ -173,7 +181,7 @@ def run_resume_leg(pool, resume_path: FilePath, skip_llm: bool) -> None:
     for path in paths:
         chain = " -> ".join(
             f"{hop.dst_title} [{'UP' if hop.edge_type == 'career_ladder' else 'LAT'} "
-            f"w={hop.weight:.3f}]"
+            f"w={hop.weight:.3f}{_wage_tag(hop)}]"
             for hop in path.hops
         )
         print(f"  cost {path.cost:.3f}: {path.hops[0].src_title} -> {chain}")

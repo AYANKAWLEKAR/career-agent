@@ -234,3 +234,42 @@ from. RW bands are also the honest answer to "seniority": SOC codes cannot
 express within-occupation progression, but an occupation whose median
 incumbent needed 4+ prior years is a senior role regardless of zone, and the
 gate now enforces exactly that.
+
+## 2026-11-09: Stage 1 — H-1B LCA wages activate the edge wage penalty
+
+Wage source decision: BLS OEWS was rejected (May 2024 release = ~18 months
+stale); the DOL OFLC H-1B LCA quarterly disclosure workbook replaced it.
+FY2026 Q3 is cumulative (Oct 2025-Jun 2026), carries 6-digit SOC codes and
+employer-offered base wages, and is published quarterly. Caveats accepted
+and recorded: base pay only, certified filing != hire, coverage skews to
+visa-sponsoring professional employers (which matches the demo verticals).
+
+Pipeline: `scripts/fetch_lca.py` downloads the 240 MB workbook ->
+slim 12-column CSV -> `scripts/load_lca_wages.py` aggregates per-SOC
+percentiles into `metro_wages` (national rows with `metro_id is null` feed
+the penalty; SF-Oakland-Berkeley MSA rows, CBSA 41860, are additive).
+
+Measured on FY2026 Q3 (1,032,735 raw rows):
+- 57.6% of rows are Excel used-range padding (595,239); real records 437,496.
+- Filters: Certified + full-time keeps 393,435; wage parse yield is 100%;
+  372 rows (0.095%) blow the [20k, 1.5M] sanity window, all annual figures
+  filed under sub-annual units; a FROM > $25k guard on Month/Week/Bi-Weekly
+  drops ~54 more mis-filed rows (Hour exempt: $240-356/hr physician comp is
+  real).
+- `WORKSITE_COUNTY` values carry a " COUNTY" suffix; a bare-name match finds
+  ZERO Bay Area rows. Normalization fixed it (23,079 MSA rows); the loader
+  now asserts the bay segment is non-empty.
+- Coverage at min_count=5: 116/124 occupations have national wages; the 8
+  without (tax examiners, nuclear/forest/hydro technicians, appraisers) have
+  no H-1B presence and stay penalty-neutral by design.
+- SOC6 collisions: 124 occupations collapse to 85 six-digit codes, so
+  specializations sharing a code share a wage row (Financial Managers and
+  Treasurers both read 11-3031: $203,007 median).
+
+Effect on the graph (edge counts unchanged — the penalty reweights, never
+gates): 508/1,289 derived edges now carry a pay-cut penalty; mean
+career_ladder weight 0.4819 -> 0.4670, skill_overlap 0.5903 -> 0.5660.
+Most-penalized edge: Financial Managers ($203k) -> Credit Counselors
+($57.6k), weight 0.355. Hops now surface `median_wage_from/to/wage_delta`
+in the narration context (keys absent when either end is unpriced, so small
+models cannot read null as "zero pay") and `+$Nk` tags in the demo output.

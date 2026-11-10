@@ -59,10 +59,20 @@ class Hop:
     dst_zone: int | None
     edge_type: str
     weight: float
+    # National median offered wage (H-1B LCA aggregates, metro_id-null rows).
+    # None when the occupation has no wage row; the hop still traverses.
+    src_wage: float | None = None
+    dst_wage: float | None = None
 
     @property
     def cost(self) -> float:
         return 1.0 - self.weight
+
+    @property
+    def wage_delta(self) -> float | None:
+        if self.src_wage is None or self.dst_wage is None:
+            return None
+        return self.dst_wage - self.src_wage
 
 
 @dataclass
@@ -118,6 +128,13 @@ def enumerate_paths(pool, start_occupation_id: int) -> list[Path]:
             "select occupation_id, title, job_zone from occupations"
         )
         meta = {int(oid): (title, zone) for oid, title, zone in cursor.fetchall()}
+        cursor.execute(
+            """
+            select occupation_id, wage_median from metro_wages
+            where metro_id is null
+            """
+        )
+        wages = {int(oid): float(w) for oid, w in cursor.fetchall() if w is not None}
         cursor.execute(_PATHS_SQL, start_id=start_occupation_id)
         paths: list[Path] = []
         for row in cursor.fetchall():
@@ -135,6 +152,8 @@ def enumerate_paths(pool, start_occupation_id: int) -> list[Path]:
                         dst_zone=meta[dst][1],
                         edge_type=str(edge_cols[2 * i]),
                         weight=float(edge_cols[2 * i + 1]),
+                        src_wage=wages.get(src),
+                        dst_wage=wages.get(dst),
                     )
                 )
             paths.append(Path(hops=hops))
