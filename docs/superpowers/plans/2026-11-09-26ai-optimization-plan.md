@@ -1,7 +1,7 @@
 # 26ai Demo Optimization Plan
 
 **Date:** 2026-11-09
-**Status:** Phase 0 complete; Phases 1–5 pending
+**Status:** Phases 0–2 complete 2026-11-10 (taxonomy-wide embed deferred); 3–5 pending
 **Goal:** Align the Career Path Navigator demo with the product scope — an Oracle
 Autonomous AI Database 26ai showcase for sales calls: multi-hop traversal,
 in-database semantic retrieval (DBMS_VECTOR + ONNX), memory modalities,
@@ -22,7 +22,7 @@ Verified live on the restarted instance (26ai 23.26.4.1.0, 2026-11-09):
   graph path surfacing → aspiration ladders → grounded LLM narration.
 - Requirements layer loaded: 169 hot-tech tools, education (RL) and experience
   (RW) requirements for 103 occupations, `coverage()` gap math implemented.
-- Test suite: 158 passed, 2 skipped, ~86% coverage; ruff + mypy clean.
+- Test suite: 242 passed, 2 skipped, 91% coverage; ruff + mypy clean.
 - Deliverables: DEMO.md, Multi-Demo.md, methodology doc, two demo scripts.
 
 ## Phases
@@ -34,29 +34,29 @@ Verified live on the restarted instance (26ai 23.26.4.1.0, 2026-11-09):
 - [x] Pin `OLLAMA_MODEL=qwen3:14b` (qwen3:8b no longer installed locally).
 - [x] Commit and push all outstanding work.
 
-### Phase 1 — Make 26ai features the demo surface (1–2 sessions)
-- [ ] Switch `paths.py` to GRAPH_TABLE as the primary traversal (hop-join SQL
-      stays as fallback and per-hop detail source) — the marquee 26ai feature
-      should be what the demo executes.
-- [ ] Make A-inference candidate search index-eligible: the current query
-      wraps vector_distance in arithmetic inside MAX with GROUP BY, which
-      disqualifies the HNSW index in every mode (silent exact fallback) —
-      restructure into per-query-vector top-K blocks, then prove it with the
-      `VECTOR INDEX HNSW SCAN` line in DBMS_XPLAN. (Research 2026-11-09:
-      this is a query restructure, not a FETCH APPROX keyword flip.)
-- [ ] Print latency and row counts in the demos so "runs inside the database"
-      is demonstrated, not asserted.
+### Phase 1 — Make 26ai features the demo surface (DONE 2026-11-10)
+- [x] Switch `paths.py` to GRAPH_TABLE as the primary traversal (hop-join SQL
+      stays as fallback behind `GRAPH_ENGINE=hop_join`) — quantified `{1,3}`
+      match, ONE ROW PER STEP, MATCHNUM()/ELEMENT_NUMBER(); ISO path modes
+      rejected by this build, so WALK mode + Python acyclic filter. Live
+      full-corpus equivalence: 124 starts, 147,117 paths per engine, zero diff.
+- [x] Make A-inference candidate search index-eligible: restructured into
+      per-query-vector `FETCH APPROX FIRST k` blocks (no WHERE — a filter
+      flips the plan back to a full scan; k padded by the 9 null-zone rows,
+      filtered in Python). `VECTOR INDEX HNSW SCAN` confirmed in the live plan.
+- [x] Print latency and row counts in the demos (`[latency]` lines + a
+      Traversal header naming the engine).
 
-### Phase 2 — Scale the retrieval story (1 session)
-- [ ] Populate `tasks.embedding` (~2,382 rows) via in-DB `vector_embedding()`.
+### Phase 2 — Scale the retrieval story (DONE 2026-11-10, except optional embed)
+- [x] Populate `tasks.embedding` (2,382 rows, 41.5s) via in-DB
+      `vector_embedding()` over the CLOB directly (`scripts/embed_tasks.py`).
 - [ ] Optionally embed the full ~1,016-occupation taxonomy for retrieval only
       (graph stays scoped to the 3 verticals).
-- [ ] Prove approximate search honestly: DBMS_XPLAN plan line, per-query ms,
-      and `DBMS_VECTOR.INDEX_ACCURACY_QUERY` output over the 2,382-task
-      corpus. (Research 2026-11-09: before/after latency at 124 vectors is
-      noise a skeptical DBA would call out — the corpus for the APPROX story
-      is the tasks table; rebuild TASKS_EMBEDDING_VIX after embedding, as it
-      was created over all-NULL rows.)
+- [x] Prove approximate search honestly: `scripts/search_tasks.py --plan`
+      pulls the real plan from v$sql (`VECTOR INDEX HNSW SCAN` on
+      TASKS_EMBEDDING_VIX, 68 ms APPROX top-8) and prints the
+      `DBMS_VECTOR.INDEX_ACCURACY_QUERY` report (100% at target 95).
+      TASKS_EMBEDDING_VIX dropped + rebuilt after embedding (10.9s).
 
 ### Phase 3 — Gap analysis in the demo (1 session)
 - [ ] LLM extracts stated tools from the resume → match into
@@ -78,7 +78,8 @@ Verified live on the restarted instance (26ai 23.26.4.1.0, 2026-11-09):
 - [ ] Run brainstorm → spec → plan before any code.
 
 ### Opportunistic / data levers
-- [ ] OEWS wage load (activates the already-wired edge wage penalty).
+- [x] ~~OEWS wage load~~ Superseded: the H-1B LCA load (2026-11-09) activated
+      the edge wage penalty with quarterly-fresh data.
 - [ ] Widen the zone-3 occupation layer (18 today) to reduce `ceiling_unmet`
       frequency for student profiles.
 - [ ] Narration backend swap to Anthropic for sales-quality prose when an API

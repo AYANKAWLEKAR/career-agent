@@ -1,6 +1,6 @@
 # Career Path Navigator — End-to-End Demo Record
 
-**Date:** 2026-11-09 (supersedes the 2026-08-28 record) · **Instance:** Oracle AI
+**Date:** 2026-11-10 (supersedes the 2026-11-09 record) · **Instance:** Oracle AI
 Database 26ai 23.26.4.1.0 (`QHZ6SNWUPW0Y1ASH`, Autonomous)
 **Repo:** [AYANKAWLEKAR/career-agent](https://github.com/AYANKAWLEKAR/career-agent)
 
@@ -24,8 +24,9 @@ running inside Oracle 26ai plus a local LLM.**
 |---|---|---|
 | Resume → structured schema | Qwen3 14B via Ollama, schema-constrained decoding | Locally (M4 Pro; nothing leaves the machine) |
 | Profile & experience embeddings | all-MiniLM-L12-v2 ONNX, `vector_embedding()` | **Inside the database** (DBMS_VECTOR) |
-| Starting-point match (A-inference) | Vector similarity + start-zone band (education ceiling, experience gate) | Inside the database |
-| Career graph traversal | `OCCUPATION_GRAPH` SQL property graph, one-hop edges | Inside the database |
+| Starting-point match (A-inference) | HNSW-indexed `FETCH APPROX` vector search + start-zone band (education ceiling, experience gate) | Inside the database |
+| Career graph traversal | `OCCUPATION_GRAPH` property graph via ISO SQL/PGQ `GRAPH_TABLE` (`{1,3}` quantified match, ONE ROW PER STEP) | Inside the database |
+| Free-text task search | 2,382 task embeddings, APPROX top-k with a `DBMS_XPLAN` plan proof (`scripts/search_tasks.py`) | Inside the database |
 | Wage context | H-1B LCA offered-wage medians on every hop, wage penalty in edge weights | Inside the database |
 | Path narration ("the story") | Qwen3 14B via Ollama, grounded on the decision record | Locally |
 | Observability | Every LLM and vector call logged to `tool_log` with status, latency, model | Inside the database |
@@ -44,7 +45,8 @@ local by choice — zero API cost, zero data egress.
 - Scope: three verticals — tech (15-1xxx/15-2xxx), finance (13-2xxx/11-3031),
   research (19-xxxx) — **124 occupations, 115 traversable**.
 - Curated layer: 16,883 skill ratings across five O*NET domains, 2,382 task
-  statements, 124 occupation embeddings with inspectable `embedding_source`.
+  statements — each embedded in-database for free-text search — and 124
+  occupation embeddings with inspectable `embedding_source`.
 - **Wages: DOL H-1B LCA FY2026 Q3 disclosures** (quarterly-fresh, Oct 2025–Jun
   2026): 393,004 certified full-time filings aggregated into per-occupation
   offered-wage percentiles — national medians for 116/124 occupations, plus
@@ -87,9 +89,36 @@ Traversal cost is `sum(1 − weight)`: the cheapest path is the strongest chain
 of skill transfer, and every hop in the output carries a `+$Nk` median-wage
 delta where both ends have data.
 
+### 26ai-native execution (slide: "The database does the work")
+
+- **The traversal is ISO SQL/PGQ.** The ranked paths come from one
+  `GRAPH_TABLE` query — a quantified `{1,3}` pattern with `ONE ROW PER STEP`,
+  `MATCHNUM()` and `ELEMENT_NUMBER()` — about 20 lines where the legacy
+  formulation needed a 56-line three-way UNION ALL of self-joins. Widening the
+  horizon to `{1,4}` on a call is a one-character edit. The UNION ALL stays
+  behind `GRAPH_ENGINE=hop_join` as a verified fallback: a live full-corpus
+  check ran both engines from all 124 starts and got **147,117 paths from
+  each, zero differences**, identical ranked surfaces.
+- **The vector search runs on the index, provably.** A-inference's old query
+  shape silently disqualified the HNSW index (full-table scan in every mode);
+  restructured as per-vector `FETCH APPROX FIRST k` probes it executes as
+  `VECTOR INDEX HNSW SCAN`. `scripts/search_tasks.py --plan` shows it live —
+  the real plan pulled from `v$sql`, plus a `DBMS_VECTOR.INDEX_ACCURACY_QUERY`
+  report over the 2,382-task corpus:
+
+```text
+query: "optimize data pipelines and automate reporting for business decisions"
+[in-db] query embedding (ALL_MINILM_L12_V2): 782 ms
+[in-db] APPROX top-8 cosine search over tasks: 68 ms, 8 hits
+  0.5914  Business Intelligence Analysts: Generate standard or custom reports...
+   |   4 |     TABLE ACCESS BY INDEX ROWID| TASKS               |
+>> |   5 |      VECTOR INDEX HNSW SCAN    | TASKS_EMBEDDING_VIX |
+Accuracy achieved (100%) is 5% higher than the Target Accuracy requested (95%)
+```
+
 ## 5. Test results (slide: "Engineering rigor")
 
-**220 passed, 2 skipped, 0 failed — 86% coverage against an 85% gate.**
+**242 passed, 2 skipped, 0 failed — 91% coverage against an 85% gate.**
 ruff and mypy clean.
 
 ```
@@ -99,7 +128,7 @@ _______________ coverage: platform darwin, python 3.13.5-final-0 _______________
 Name                                    Stmts   Miss  Cover   Missing
 ---------------------------------------------------------------------
 src/navigator/__init__.py                   1      0   100%
-src/navigator/config.py                    52      0   100%
+src/navigator/config.py                    61      0   100%
 src/navigator/db/__init__.py                0      0   100%
 src/navigator/db/migrations.py            134      9    93%   121, 152-153, 227-236
 src/navigator/db/pool.py                   25      0   100%
@@ -113,13 +142,13 @@ src/navigator/ingest/onet_sql.py          143      5    97%   80-81, 99, 104, 11
 src/navigator/ingest/scorecard.py          52      3    94%   103-104, 107
 src/navigator/lca.py                       95      3    97%   109, 114, 186
 src/navigator/llm.py                      132     36    73%   336-351, 420-435, 440-443, 458-462, 482-510
-src/navigator/paths.py                     80     29    64%   133-153, 165-196, 204, 212
-src/navigator/profile.py                  163     38    77%   267-269, 300-360, 373-495
-src/navigator/requirements.py              88     30    66%   168-178, 183-238
+src/navigator/paths.py                    104      4    96%   182-192, 268
+src/navigator/profile.py                  182     16    91%   269-271, 302-362, 391, 463, 472
+src/navigator/requirements.py              88     26    70%   183-238
 ---------------------------------------------------------------------
-TOTAL                                    1200    164    86%
-Required test coverage of 85% reached. Total coverage: 86.33%
-220 passed, 2 skipped in 1.31s
+TOTAL                                    1252    113    91%
+Required test coverage of 85% reached. Total coverage: 90.97%
+242 passed, 2 skipped in 1.04s
 ```
 
 Testing on the real resume (not just synthetic data) caught two live defects
@@ -138,6 +167,10 @@ caught three landmines the loader now handles with regression tests: county
 values carry a " COUNTY" suffix (a bare-name filter matches zero Bay Area
 rows), 57.6% of extracted rows are blank Excel padding, and ~54 annual
 salaries were filed under Month/Week units (a $55,000/"Month" math teacher).
+The GRAPH_TABLE/APPROX change itself shipped through two parallel TDD lanes
+plus a three-lens adversarial review (zero blocking findings; the review
+caught a silently ineffective driver timeout and unified both engines onto
+one shared routing filter), then a live equivalence check across every start.
 
 ## 6. Demo inputs
 
@@ -147,7 +180,8 @@ salaries were filed under Month/Week units (a $55,000/"Month" math teacher).
   parsed entirely by the LLM into the profile schema (no manual structuring).
 - **Settings for this run**: `WAGE_SCOPE=national` (the general-student mode;
   `alameda` and `bay` scopes swap the displayed medians to the local market
-  without touching path selection).
+  without touching path selection) and `GRAPH_ENGINE=graph_table` (the ISO
+  SQL/PGQ traversal; `hop_join` keeps the legacy UNION ALL as a fallback).
 
 ## 7. Verbatim terminal transcript
 
@@ -162,11 +196,13 @@ Graph    : OCCUPATION_GRAPH (SQL property graph)
 ONNX     : ALL_MINILM_L12_V2 (in-database)
 Corpus   : 124 occupations, 2564 edges
 Wages    : scope=national (H-1B LCA FY2026; display only — penalty is national)
+Traversal: engine=graph_table (ISO SQL/PGQ, ONE ROW PER STEP {1,3})
 
 ==========================================================================
 PERSONA: Frontend engineer, bachelor's
 ==========================================================================
 resume text : CS degree, two years frontend at a logistics startup, genomics internship, calculus tutoring.
+[latency] A-inference round trip: 230 ms (per-vector APPROX top-k)
 
 START: Computer Programmers [zone 4] similarity 0.4153  (education clamp moved the match up)
 candidates considered:
@@ -180,6 +216,7 @@ candidates considered:
   0.3674  [z4] Computer Network Architects
   0.3588  [z4] Blockchain Engineers
   0.3553  [z4] Computer Systems Analysts
+[latency] path enumeration (graph_table): 546 ms, 5 ranked paths from Computer Programmers
 
 ranked paths (cost = sum of 1 - skill-transfer weight):
   cost 0.366: Computer Programmers -> Data Warehousing Specialists [LAT w=0.634 +$48k]
@@ -192,6 +229,7 @@ ranked paths (cost = sum of 1 - skill-transfer weight):
 PERSONA: Tax associate, master's
 ==========================================================================
 resume text : Master's in finance. Three years preparing individual tax returns.
+[latency] A-inference round trip: 123 ms (per-vector APPROX top-k)
 
 START: Tax Preparers [zone 3] similarity 0.6495  (clamp_failed: education outranks every semantic match)
 candidates considered:
@@ -205,6 +243,7 @@ candidates considered:
   0.2973  [z4] Insurance Underwriters
   0.2798  [z4] Financial and Investment Analysts
   0.2795  [z4] Financial Risk Specialists
+[latency] path enumeration (graph_table): 808 ms, 5 ranked paths from Tax Preparers
 
 ranked paths (cost = sum of 1 - skill-transfer weight):
   cost 0.283: Tax Preparers -> Tax Examiners and Collectors, and Revenue Agents [LAT w=0.717]
@@ -217,6 +256,7 @@ ranked paths (cost = sum of 1 - skill-transfer weight):
 PERSONA: Data scientist, PhD
 ==========================================================================
 resume text : PhD in statistics, five years ML for clinical trials.
+[latency] A-inference round trip: 133 ms (per-vector APPROX top-k)
 
 START: Statisticians [zone 5] similarity 0.5649
 candidates considered:
@@ -230,6 +270,7 @@ candidates considered:
   0.3244  [z4] Social Science Research Assistants
   0.3112  [z5] Political Scientists
   0.3084  [z4] Geological Technicians, Except Hydrologic Technicians
+[latency] path enumeration (graph_table): 147 ms, 5 ranked paths from Statisticians
 
 ranked paths (cost = sum of 1 - skill-transfer weight):
   cost 0.255: Statisticians -> Biostatisticians [LAT w=0.745 +$0k]
@@ -254,6 +295,7 @@ LLM PARSE (structured output -> profile schema):
     [3] Machine Learning Research Assistant @ Berkeley Nanotechnology Lab: Designed PyTorch models to classify and process lithography manufacturing data a
     [4] Strategy Consultant, Contract @ The CollegeBoard: Refine GTM positioning strategy for 2027 product launch by evaluating 15 competi
     [5] Robotics Research Assistant @ Rutgers University PRACSYS Lab: Deployed multimodal CV pipeline for industrial decision-making with RGB, depth, 
+[latency] A-inference round trip: 207 ms (per-vector APPROX top-k)
 
 start band: zones [3..3]
 START: Data Scientists [zone 4] similarity 0.431  (ceiling_unmet: every match sits above the band)
@@ -267,6 +309,7 @@ START: Data Scientists [zone 4] similarity 0.431  (ceiling_unmet: every match si
   0.3595  [z4] Bioinformatics Technicians
   0.3574  [z4] Business Intelligence Analysts
   0.3534  [z5] Physicists
+[latency] path enumeration (graph_table): 926 ms, 5 ranked paths from Data Scientists
   cost 0.137: Data Scientists -> Mathematicians [UP w=0.863 -$1k]
   cost 0.226: Data Scientists -> Computer and Information Research Scientists [UP w=0.774 +$64k]
   cost 0.238: Data Scientists -> Biostatisticians [UP w=0.762 +$3k]
@@ -274,20 +317,21 @@ START: Data Scientists [zone 4] similarity 0.431  (ceiling_unmet: every match si
   cost 0.260: Data Scientists -> Bioinformatics Scientists [UP w=0.740 -$41k]
 
 ASPIRATION: Mathematicians [z5] similarity 0.514
+[latency] path enumeration (graph_table): 933 ms, 3 ranked paths to Mathematicians
 
 LLM NARRATION (grounded in the decision record above):
 
-Based on your resume and the skills you've developed, the system has identified that your strongest starting point is as a **Data Scientist** in **Job Zone 4**. This match was driven by your experience in building AI agents, deploying machine learning models, and working with large datasets — all of which align closely with the day-to-day responsibilities of a Data Scientist. While your education in Applied Mathematics and Data Science from UC Berkeley is strong, the system determined that your completed experience supports starting in Zone 4, not higher. That means you're well-positioned to begin your career in this field, but you're not quite at the level of more advanced roles like Mathematicians or Physicists yet.
+Based on your resume and education, your starting point is as a **Data Scientist** in **Job Zone 4**, which reflects the level of preparation you've completed so far. While your profile shows a strong similarity to **Mathematicians** (with a similarity score of 0.514), your education and experience place you in a slightly lower zone, meaning you can't start there yet. Instead, you begin in Zone 4, where your skills and background align most closely with the role of a Data Scientist.
 
-One of the most promising paths forward is to move **up one zone** to become a **Mathematician** in **Job Zone 5**. This is a direct step, and the system estimates that you already share **86.3% similarity** in the skills required for this role. While the median wage for Mathematicians is slightly lower than that of Data Scientists, this is a natural progression for someone with your background in applied math and data science. The move is plausible because your experience with complex modeling, algorithm design, and data analysis overlaps strongly with the work of a Mathematician.
+Your experience is impressive — from building AI agents that automate sourcing and screening for investment opportunities, to deploying multimodal computer vision pipelines for industrial decision-making, and even designing PyTorch models for lithography manufacturing. These experiences are strong indicators of your ability to work with complex data systems, build scalable models, and apply mathematical concepts in real-world scenarios. Your education in Applied Mathematics and Data Science further reinforces this, and your GPA shows a strong academic foundation.
 
-Another option is to first move up to **Biostatisticians** in Zone 5, which shares **76.2% similarity** with your current role. This is a slightly more indirect path, but it’s still a strong option. From there, you could transition laterally to Mathematicians, though the skill overlap is a bit lower at **66.8%**. This path might be a good fit if you're interested in applying your skills to healthcare or life sciences, where biostatistics plays a key role.
+Now, looking ahead, there are a few clear paths that could help you move forward. One of the most direct is a **one-zone climb to Mathematicians**, which is just a step above your current position. The skill transfer weight is strong at **0.863**, meaning your current skills align well with the requirements of a Mathematician. While the median wage for Mathematicians is slightly lower than that of a Data Scientist, this is a natural transition for someone with your background, and the move is both feasible and logical.
 
-Finally, there’s a path to **Computer and Information Research Scientists** in Zone 5, which offers a significant jump in median wage — over $64,000 more than your current role. This is a more challenging move, as the skill overlap is **77.4%**, but it’s still within reach given your experience with AI, machine learning, and data infrastructure.
+Another option is to first move up to **Biostatisticians** in Zone 5, which has a skill transfer weight of **0.762**, and then make a lateral move to Mathematicians. This path is slightly more complex, but it allows you to build experience in a related field before transitioning to your aspiration. Similarly, moving to **Statisticians** first and then to Mathematicians is another viable route, though the skill transfer weight is slightly lower.
 
-Each of these paths reflects a realistic and structured way forward, based on the skills you’ve already built and the experience you’ve completed. You’re not starting from the bottom — you're already standing on a solid foundation, and the next steps are within reach.
+Each of these paths reflects a realistic and achievable progression based on your current skills and experience. You're already standing on a strong foundation — now, it's about choosing the next step that best aligns with your goals.
 
-[507 output tokens, 43.2s]
+[448 output tokens, 33.0s]
 ```
 
 ## 8. What the transcript demonstrates (slide-by-slide talking points)
@@ -321,10 +365,15 @@ one screen of output — with wage context on every rung (Computer and
 Information Research Scientists +$64k; Bioinformatics Scientists −$41k, which
 the penalty pushed down the ranking).
 
+**The engine shows its work.** The header names the active traversal engine
+and every stage prints a measured `[latency]` line — 123–230 ms A-inference
+round trips and sub-second `GRAPH_TABLE` enumerations on the Always Free tier
+— so "runs inside the database" is a number on screen, not a claim.
+
 **The story is grounded, not generated folklore.** Every number in the
-narration — the 0.431 start similarity, the 86.3% skill-transfer weight, the
-"slightly lower" −$1k Mathematicians wage delta, the +$64k research-scientist
-jump — appears in the decision record above it. The narrator receives only
+narration — the 0.514 Mathematicians similarity, the 0.863 skill-transfer
+weight, the 0.762 Biostatisticians rung, the "slightly lower" Mathematicians
+median — appears in the decision record above it. The narrator receives only
 that record, never database access, so it can only explain choices the system
 actually made.
 

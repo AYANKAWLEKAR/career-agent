@@ -285,3 +285,49 @@ Measured contrast: Software Developers $145,018 national vs $187,574
 Alameda (+29%); Financial and Investment Analysts -10% locally. Same hop,
 two stories: Computer Programmers -> Software Developers is +$50k
 nationally, +$80k in Alameda County.
+
+## 2026-11-10: Phase 1+2 — the 26ai-native showcase
+
+### GRAPH_TABLE is the primary traversal
+
+`paths.py` now runs the ISO SQL/PGQ form by default (`GRAPH_ENGINE=graph_table`):
+one quantified `{1,3}` match with ONE ROW PER STEP, MATCHNUM() and
+ELEMENT_NUMBER() — per-hop edge type/weight/zone preserved, which the old
+docstring claimed GRAPH_TABLE could not do (true before 23.7; false now).
+This build (23.26.4.1.0) rejects ISO path modes (MATCH ACYCLIC/TRAIL fail to
+parse), so the match runs in WALK mode and Python drops walks with repeated
+vertices. Both engines share one routing filter
+(`edge_type in ('career_ladder','skill_overlap')`, equivalent to the old
+`source like 'derived_%'` — live-verified bijection) so they cannot diverge.
+Live full-corpus equivalence: 124 starts, 147,117 unique paths per engine,
+zero diff, identical ranked surfaces; hop-join 20.6s total vs graph_table
+47.4s (~0.17s vs ~0.38s per start). The UNION ALL stays one env var away.
+
+### A-inference is HNSW-index-eligible
+
+The old candidate query (MAX of vector_distance arithmetic under GROUP BY)
+ran TABLE ACCESS STORAGE FULL in every mode. It is now one
+`FETCH APPROX FIRST k` probe per query vector (profile + each experience),
+combined in Python by max((1-dist)*wt). Constraints discovered live: ANY
+WHERE clause flips the plan back to a full scan, so the job_zone/null filters
+moved to Python with k padded by the 9 null-zone occupations; a bound :k is
+fine. Plan now shows VECTOR INDEX HNSW SCAN. Per-vector top-k union provably
+contains the global top-N (weights constant per vector preserve distance
+order). Same candidates/similarities as before to 4dp on all demo personas.
+
+### Task corpus embedded; APPROX proven honestly
+
+`scripts/embed_tasks.py`: 2,382 task CLOBs embedded in-database in 41.5s
+(vector_embedding takes the CLOB directly), then TASKS_EMBEDDING_VIX dropped
+and rebuilt in 10.9s — mandatory, since 007 created it over all-NULL rows.
+`scripts/search_tasks.py "<free text>" --plan`: in-DB query embedding, APPROX
+top-k over tasks (68 ms), occupation titles resolved after (a join would
+disqualify the index), real plan pulled from v$sql with the HNSW line
+highlighted, and DBMS_VECTOR.INDEX_ACCURACY_QUERY (100% at target 95).
+Demos print a Traversal header and measured `[latency]` lines.
+
+Review notes: shipped via two parallel TDD lanes + three adversarial review
+lenses (zero blocking findings). The review caught `cursor.callTimeout` being
+a silent no-op (call timeout lives on the Connection in python-oracledb) —
+fixed here and in the two older scripts that had the same dead line.
+Suite: 242 passed, 2 skipped, 91% coverage; ruff + mypy clean.

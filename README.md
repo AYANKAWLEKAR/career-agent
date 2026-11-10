@@ -55,6 +55,8 @@ uv run python -m navigator.db.migrations
 | `CAREERONESTOP_USER_ID`, `CAREERONESTOP_TOKEN` | for CareerOneStop | CareerOneStop API credentials |
 | `SCORECARD_API_KEY` | no | College Scorecard API key |
 | `BLS_API_KEY` | no | BLS API key (unused this phase) |
+| `WAGE_SCOPE` | no (default `national`) | Displayed wage scope: `national`, `bay`, or `alameda` (the edge penalty always uses national rows) |
+| `GRAPH_ENGINE` | no (default `graph_table`) | Path traversal: `graph_table` (ISO SQL/PGQ) or `hop_join` (legacy UNION ALL fallback) |
 | `DEMO_MODE` | no (default `true`) | Demo mode flag |
 | `LOG_LEVEL` | no (default `INFO`) | Log level |
 | `POOL_MIN`, `POOL_MAX`, `POOL_INCREMENT` | no (defaults 1/4/1) | Connection pool sizing |

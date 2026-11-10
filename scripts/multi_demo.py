@@ -25,6 +25,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import time
 
 from navigator.config import get_settings
 from navigator.db.pool import create_pool
@@ -41,6 +42,10 @@ def _wage_tag(hop) -> str:
     if delta is None:
         return ""
     return f" {'+' if delta >= 0 else '-'}${abs(delta) / 1000:.0f}k"
+
+
+def _ms(started: float) -> str:
+    return f"{(time.monotonic() - started) * 1000:.0f} ms"
 
 PERSONAS: list[tuple[str, ProfileInput]] = [
     (
@@ -174,6 +179,11 @@ def show_engine(pool) -> None:
         print(f"Corpus   : {n_occ} occupations, {cursor.fetchone()[0]} edges")
     print(f"Wages    : scope={get_settings().wage_scope} "
           "(H-1B LCA FY2026; display only — penalty is national)")
+    engine = get_settings().graph_engine
+    if engine == "hop_join":
+        print("Traversal: engine=hop_join (legacy UNION ALL fallback)")
+    else:
+        print("Traversal: engine=graph_table (ISO SQL/PGQ, ONE ROW PER STEP {1,3})")
 
 
 def run_persona(pool, label: str, profile: ProfileInput, skip_llm: bool) -> None:
@@ -187,7 +197,9 @@ def run_persona(pool, label: str, profile: ProfileInput, skip_llm: bool) -> None
               f"{e.raw_text[:72]}")
 
     profile_id = create_profile(pool, profile)
+    started = time.monotonic()
     match = infer_start(pool, profile_id)
+    print(f"[latency] A-inference round trip: {_ms(started)} (per-vector APPROX top-k)")
     flags = []
     if match.ceiling_applied:
         flags.append("start ceiling moved the match down into the band")
@@ -209,7 +221,10 @@ def run_persona(pool, label: str, profile: ProfileInput, skip_llm: bool) -> None
     for candidate in match.candidates:
         print(f"  {candidate.similarity:6.4f}  [z{candidate.job_zone}] {candidate.title}")
 
+    started = time.monotonic()
     paths = surface_paths(pool, match.matched.occupation_id)
+    print(f"[latency] path enumeration ({get_settings().graph_engine}): {_ms(started)}, "
+          f"{len(paths)} ranked paths from {match.matched.title}")
     print("\nranked paths (cost = sum of 1 - skill-transfer weight):")
     for path in paths:
         chain = " -> ".join(
@@ -224,8 +239,11 @@ def run_persona(pool, label: str, profile: ProfileInput, skip_llm: bool) -> None
         top_asp = match.aspirations[0]
         print(f"\nASPIRATION: {top_asp.title} [z{top_asp.job_zone}] "
               f"similarity {top_asp.similarity} — resembles it, cannot start there yet")
+        started = time.monotonic()
         aspiration_paths = surface_paths_to(
             pool, match.matched.occupation_id, top_asp.title, top_k=3)
+        print(f"[latency] path enumeration ({get_settings().graph_engine}): {_ms(started)}, "
+              f"{len(aspiration_paths)} ranked paths to {top_asp.title}")
         if aspiration_paths:
             for path in aspiration_paths:
                 chain = " -> ".join(
