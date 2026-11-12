@@ -403,6 +403,35 @@ class TestNarrationContext:
         assert "national" in county["methodology_notes"]["wages"]  # fallback named
 
 
+    def test_degree_outcomes_appear_only_when_provided(self):
+        profile = ProfileInput(user_ref="u", raw_text="r")
+        paths = [Path(hops=[_hop("A", 0.8)])]
+        plain = build_narration_context(profile, self._match(), paths)
+        assert "degree_outcomes" not in plain
+        outcomes = {"your_majors": [{"matched_field": "Applied Mathematics"}]}
+        rich = build_narration_context(profile, self._match(), paths, outcomes=outcomes)
+        assert rich["degree_outcomes"] == outcomes
+
+    def test_narrate_paths_sends_outcomes_to_the_model(self):
+        from navigator.llm import narrate_paths
+        seen = {}
+
+        class Backend:
+            model = "fake"
+
+            def complete(self, system, user):
+                seen["system"], seen["user"] = system, user
+                return "a story", 1, 1
+
+        profile = ProfileInput(user_ref="u", raw_text="r")
+        narrate_paths(profile, self._match(), [Path(hops=[_hop("A", 0.8)])],
+                      backend=Backend(),
+                      outcomes={"your_majors": [{"matched_field": "Applied Mathematics"}]})
+        assert "Applied Mathematics" in seen["user"]
+        assert "degree_outcomes" in seen["user"]
+        assert "past graduates" in seen["system"]
+
+
 class TestAnthropicBackend:
     def test_parse_uses_structured_output_and_returns_parsed_object(self):
         parsed = ParsedResume(

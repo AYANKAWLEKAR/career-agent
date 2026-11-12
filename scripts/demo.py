@@ -22,6 +22,7 @@ from pathlib import Path as FilePath
 from navigator.config import get_settings
 from navigator.db.pool import create_pool
 from navigator.llm import narrate_paths, parse_resume, parsed_to_profile
+from navigator.outcomes import gather_outcomes
 from navigator.paths import surface_paths, surface_paths_to
 from navigator.profile import ExperienceInput, ProfileInput, create_profile, infer_start
 
@@ -38,6 +39,23 @@ def _wage_tag(hop) -> str:
 
 def _ms(started: float) -> str:
     return f"{(time.monotonic() - started) * 1000:.0f} ms"
+
+
+def show_outcomes(pool, profile, match, thread_id, near=None):
+    """Print the degree-outcomes section; return its narration context (or None)."""
+    started = time.monotonic()
+    asp = match.aspirations[0] if match.aspirations else None
+    report = gather_outcomes(
+        pool, profile.education_majors, profile.education_level,
+        aspiration_title=asp.title if asp else None,
+        aspiration_id=asp.occupation_id if asp else None,
+        aspiration_zone=asp.job_zone if asp else None,
+        location_text=profile.location_text, near=near, thread_id=thread_id)
+    if report.lines:
+        print()
+        print("\n".join(report.lines))
+        print(f"[latency] degree outcomes (vector major match + spatial): {_ms(started)}")
+    return report.context
 
 PERSONAS = [
     ProfileInput(
@@ -109,7 +127,7 @@ def show_engine(pool) -> None:
         print("Traversal: engine=graph_table (ISO SQL/PGQ, ONE ROW PER STEP {1,3})")
 
 
-def run_pipeline(pool, profile: ProfileInput, label: str) -> None:
+def run_pipeline(pool, profile: ProfileInput, label: str, near: str | None = None) -> None:
     print(f"\n{RULE}\nPERSONA: {label}\n{RULE}")
     print(f"resume text : {profile.raw_text}")
     profile_id = create_profile(pool, profile)
@@ -146,12 +164,15 @@ def run_pipeline(pool, profile: ProfileInput, label: str) -> None:
             for hop in path.hops
         )
         print(f"  cost {path.cost:.3f}: {path.hops[0].src_title} -> {chain}")
+    show_outcomes(pool, profile, match, f"profile-{profile_id}", near)
 
 
 RESUME_USER_REF = "ayan@resume-demo"
 
 
-def run_resume_leg(pool, resume_path: FilePath, skip_llm: bool) -> None:
+def run_resume_leg(
+    pool, resume_path: FilePath, skip_llm: bool, near: str | None = None
+) -> None:
     print(f"\n{RULE}\nREAL RESUME: {resume_path}\n{RULE}")
     resume_text = resume_path.read_text(encoding="utf-8")
     print(f"input: {len(resume_text)} chars of raw resume text")
@@ -219,10 +240,13 @@ def run_resume_leg(pool, resume_path: FilePath, skip_llm: bool) -> None:
         print(f"[latency] path enumeration ({get_settings().graph_engine}): {_ms(started)}, "
               f"{len(aspiration_paths)} ranked paths to {top_asp.title}")
 
+    outcomes = show_outcomes(pool, profile, match, f"profile-{profile_id}", near)
+
     print("\nLLM NARRATION (grounded in the decision record above):\n")
     narration = narrate_paths(profile, match, paths, pool=pool,
                               wage_scope=get_settings().wage_scope,
-                              aspiration_paths=aspiration_paths)
+                              aspiration_paths=aspiration_paths,
+                              outcomes=outcomes)
     print(narration.story)
     print(f"\n[{narration.output_tokens} output tokens, "
           f"{narration.latency_ms / 1000:.1f}s]")
@@ -232,6 +256,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--resume", type=FilePath, default=FilePath("resumetext/ayan.txt"))
     parser.add_argument("--skip-llm", action="store_true")
+    parser.add_argument("--near", default=None,
+                        help="location anchor for nearby programs, e.g. 'Berkeley, CA' "
+                             "(default: the location parsed from the resume)")
     parser.add_argument("--keep-personas", action="store_true",
                         help="leave persona profiles in the database")
     args = parser.parse_args(argv)
@@ -246,10 +273,10 @@ def main(argv: list[str] | None = None) -> int:
               "Data scientist, PhD"]
     try:
         for label, persona in zip(labels, PERSONAS, strict=True):
-            run_pipeline(pool, persona, label)
+            run_pipeline(pool, persona, label, args.near)
 
         if args.resume.is_file():
-            run_resume_leg(pool, args.resume, args.skip_llm)
+            run_resume_leg(pool, args.resume, args.skip_llm, args.near)
         else:
             print(f"\n(resume file {args.resume} not found — "
                   "skipping the real-resume leg)", file=sys.stderr)

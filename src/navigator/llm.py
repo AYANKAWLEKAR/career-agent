@@ -131,7 +131,13 @@ Hard rules:
   resume reads. When an aspiration is present, treat it as the arc of the
   story: "you already resemble X — here is the realistic starting point and
   the ladder that gets you to X", using the aspiration ladder's hops. An empty
-  ladder means the graph found no route within three moves; say so plainly."""
+  ladder means the graph found no route within three moves; say so plainly.
+- When degree_outcomes is present you may cite the earnings and debt figures for
+  the person's own major and for the graduate programs listed, exactly as given.
+  They are medians for past graduates of those programs: say so, never present
+  them as a prediction or guarantee, and never estimate a horizon that is absent
+  (absent means unpublished). Listed programs are examples from the data, not
+  recommendations."""
 
 
 @dataclass
@@ -220,12 +226,13 @@ def build_narration_context(
     profile: ProfileInput, match: MatchResult, paths: list[Path],
     aspiration_paths: list[Path] | None = None,
     wage_scope: str = "national",
+    outcomes: dict | None = None,
 ) -> dict:
     """Assemble the decision record the narration is grounded in.
 
     Everything the story may cite is in this dict; nothing else reaches the model.
     """
-    return {
+    context = {
         "parsed_profile": {
             # The self-description carries stated interests; the match is made on
             # experience evidence, so the story can honestly bridge "where the
@@ -324,6 +331,9 @@ def build_narration_context(
             ),
         },
     }
+    if outcomes is not None:
+        context["degree_outcomes"] = outcomes
+    return context
 
 
 def _log(pool, call_type: str, thread_id: str, inputs: dict, outputs: dict | None,
@@ -477,11 +487,13 @@ def narrate_paths(
     backend=None,
     aspiration_paths: list[Path] | None = None,
     wage_scope: str = "national",
+    outcomes: dict | None = None,
 ) -> NarrationResult:
     """Turn the decision record into a grounded story (call_type llm_compose)."""
     backend = backend or default_backend()
     context = build_narration_context(
-        profile, match, paths, aspiration_paths, wage_scope=wage_scope)
+        profile, match, paths, aspiration_paths, wage_scope=wage_scope,
+        outcomes=outcomes)
     user_message = (
         "Here is the decision record. Explain it to me as a story:\n\n"
         + json.dumps(context, indent=2)

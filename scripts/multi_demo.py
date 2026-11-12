@@ -30,6 +30,7 @@ import time
 from navigator.config import get_settings
 from navigator.db.pool import create_pool
 from navigator.llm import narrate_paths
+from navigator.outcomes import gather_outcomes
 from navigator.paths import surface_paths, surface_paths_to
 from navigator.profile import ExperienceInput, ProfileInput, create_profile, infer_start
 
@@ -46,6 +47,23 @@ def _wage_tag(hop) -> str:
 
 def _ms(started: float) -> str:
     return f"{(time.monotonic() - started) * 1000:.0f} ms"
+
+
+def show_outcomes(pool, profile, match, thread_id, near=None):
+    """Print the degree-outcomes section; return its narration context (or None)."""
+    started = time.monotonic()
+    asp = match.aspirations[0] if match.aspirations else None
+    report = gather_outcomes(
+        pool, profile.education_majors, profile.education_level,
+        aspiration_title=asp.title if asp else None,
+        aspiration_id=asp.occupation_id if asp else None,
+        aspiration_zone=asp.job_zone if asp else None,
+        location_text=profile.location_text, near=near, thread_id=thread_id)
+    if report.lines:
+        print()
+        print("\n".join(report.lines))
+        print(f"[latency] degree outcomes (vector major match + spatial): {_ms(started)}")
+    return report.context
 
 PERSONAS: list[tuple[str, ProfileInput]] = [
     (
@@ -255,13 +273,16 @@ def run_persona(pool, label: str, profile: ProfileInput, skip_llm: bool) -> None
         else:
             print("  no route within 3 moves from the chosen start")
 
+    outcomes = show_outcomes(pool, profile, match, profile.user_ref)
+
     if skip_llm:
         return
     print("\nLLM NARRATION (grounded in the decision record above):\n")
     narration = narrate_paths(profile, match, paths, pool=pool,
                               wage_scope=get_settings().wage_scope,
                               thread_id=profile.user_ref,
-                              aspiration_paths=aspiration_paths)
+                              aspiration_paths=aspiration_paths,
+                              outcomes=outcomes)
     print(narration.story)
     print(f"\n[{narration.output_tokens} output tokens, "
           f"{narration.latency_ms / 1000:.1f}s]")
