@@ -1,7 +1,7 @@
 # 26ai Demo Optimization Plan
 
 **Date:** 2026-11-09
-**Status:** Phases 0–2 complete 2026-11-10 (taxonomy-wide embed deferred); 3–5 pending
+**Status:** Phases 0–2 complete 2026-11-10 (taxonomy-wide embed deferred); Stage 2 (Scorecard outcomes) complete 2026-11-12; 3–5 pending
 **Goal:** Align the Career Path Navigator demo with the product scope — an Oracle
 Autonomous AI Database 26ai showcase for sales calls: multi-hop traversal,
 in-database semantic retrieval (DBMS_VECTOR + ONNX), memory modalities,
@@ -22,7 +22,7 @@ Verified live on the restarted instance (26ai 23.26.4.1.0, 2026-11-09):
   graph path surfacing → aspiration ladders → grounded LLM narration.
 - Requirements layer loaded: 169 hot-tech tools, education (RL) and experience
   (RW) requirements for 103 occupations, `coverage()` gap math implemented.
-- Test suite: 242 passed, 2 skipped, 91% coverage; ruff + mypy clean.
+- Test suite: 322 passed, 2 skipped, 93% coverage; ruff + mypy clean; 18/18 live health checks.
 - Deliverables: DEMO.md, Multi-Demo.md, methodology doc, two demo scripts.
 
 ## Phases
@@ -76,6 +76,17 @@ Verified live on the restarted instance (26ai 23.26.4.1.0, 2026-11-09):
       candidate/band decision view → interactive weighted graph →
       story + gap panel → observability drawer reading `tool_log`.
 - [ ] Run brainstorm → spec → plan before any code.
+
+### Stage 2 — College Scorecard degree outcomes (DONE 2026-11-12)
+- [x] Fetch + load 6,196 institutions / 62,926 priced programs; NCES CIP-SOC
+      crosswalk (966 links, all 124 occupations); 370 CIPs embedded in-DB.
+- [x] Free-text major -> CIP by vector match; outcomes aggregation; fused feeder
+      ranking; spatial nearby-programs; JSON Relational Duality view
+      `major_outcomes_dv`; narration grounded on published figures only.
+- [x] `scripts/health_check.py` (18 probes) and `scripts/benchmark.py`.
+- [ ] Stage 3 (USAJobs postings: spatial + in-DB embedding + hybrid index) —
+      needs the USAJobs key; Scorecard data also enables a per-institution
+      comparison once the resume parse captures the school.
 
 ### Opportunistic / data levers
 - [x] ~~OEWS wage load~~ Superseded: the H-1B LCA load (2026-11-09) activated

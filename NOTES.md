@@ -331,3 +331,59 @@ lenses (zero blocking findings). The review caught `cursor.callTimeout` being
 a silent no-op (call timeout lives on the Connection in python-oracledb) —
 fixed here and in the two older scripts that had the same dead line.
 Suite: 242 passed, 2 skipped, 91% coverage; ruff + mypy clean.
+
+## 2026-11-12: Stage 2 — College Scorecard degree outcomes
+
+### What shipped
+
+* `scripts/fetch_scorecard.py` -> JSONL (6,196 schools, 215,131 raw programs, ~7 min,
+  62 pages of ~2.7 MB); `scripts/load_scorecard.py` loads it idempotently (full
+  replace): `institutions` (+ SDO_GEOMETRY point), `programs` (62,926 priced rows
+  at associate/bachelor's/master's/doctoral/professional levels), `program_occupations`
+  (966 CIP->occupation links, all 124 occupations reachable), `cip_codes` (370 CIPs,
+  titles embedded in-DB, HNSW index created AFTER the embeddings).
+* Migration `014_scorecard_outcomes.sql`: 5/7-year earnings, loan payment and award
+  columns on `programs`; `cip_codes`; and the `major_outcomes_dv` JSON Relational
+  Duality view (institutions + programs). Duality DDL worked first try on 26ai
+  23.26.4.1.0 with `@insert @update` on both tables.
+* `navigator/programs.py` (pure transforms, tested) and `navigator/outcomes.py`
+  (major->CIP vector match, program medians via PERCENTILE_CONT, feeder fields,
+  city anchor from our own institutions table, spatial radius search, best-paid
+  list, report formatter, narration context). Narration gains an optional
+  `degree_outcomes` block and a system-prompt rule: cite only published figures,
+  say they are past graduates' medians, never estimate an absent horizon.
+* Demos print a DEGREE OUTCOMES section per persona; the real resume also gets graduate
+  programs near its parsed location. Outcome queries log to `tool_log`
+  (`relational_query_programs`, `spatial_query_metros`).
+* `scripts/health_check.py` (18 live probes) and `scripts/benchmark.py`.
+
+### Findings worth remembering
+
+* The pre-existing Scorecard client asked for field names that do not exist
+  (`earnings.median_earnings_1yr`, `debt.median_debt`); the real paths are
+  `earnings.{1,4,5,7}_yr.overall_median_earnings` and
+  `debt.staff_grad_plus.all.eval_inst.median`. Fixed with a regression test that pins
+  the live names. `school.operating=1` filters closed schools.
+* Scorecard suppresses small cells: of 215k raw programs only 62.9k publish anything
+  we store, and graduate programs near a given city are often absent (Mathematicians'
+  feeder fields have 2 programs with published outcomes within 100 miles of
+  Berkeley). Output says "N programs with published outcomes" rather than implying
+  coverage. New fields (Data Science, CIP 3070) publish 1-year earnings only.
+* The NCES crosswalk is many-to-many and unweighted. Ranking feeder fields by graduate
+  count alone is misleading ("Ecology" under Statisticians); similarity alone drops
+  Computer Science for Software Developers. `feeder_cips` fuses in-database vector
+  similarity (occupation embedding vs CIP title embedding) with graduate counts by
+  reciprocal rank. 
+* `level` is a reserved word and cannot be a bind name (ORA-01745) — fake-cursor tests
+  cannot catch this; live runs did.
+* **HNSW graph can be empty while the index is VALID.** After the instance restart,
+  `OCCUPATIONS_EMBEDDING_VIX` showed NUM_VECTORS=0 in `v$vector_graph_index` and every
+  occupations probe planned a full table scan (correct results, no index). Fix:
+  drop + recreate the index (4 s). `health_check.py` now asserts each graph holds all
+  its vectors. Run it before every demo day.
+* Benchmarks (p50): GRAPH_TABLE enumeration 422 ms vs hop-join 199 ms (2.1x slower,
+  identical path sets); APPROX vs exact vector search ~20 ms both at 124 and 2,382
+  vectors (client round trip dominates) with recall@8 = 1.000 over 100 query vectors;
+  outcome queries 19-41 ms.
+* Earnings are federal-aid recipients' medians for graduates working and not enrolled,
+  by program (CIP + credential level), not by occupation.
