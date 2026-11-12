@@ -26,13 +26,23 @@ PAGE_SIZE = 100
 INSTITUTION_FIELDS = (
     "id,school.name,school.city,school.state,location.lat,location.lon,school.ownership"
 )
-FIELD_OF_STUDY_FIELDS = (
-    "id,school.name,latest.programs.cip_4_digit.code,"
-    "latest.programs.cip_4_digit.title,latest.programs.cip_4_digit.credential.level,"
-    "latest.programs.cip_4_digit.earnings.median_earnings_1yr,"
-    "latest.programs.cip_4_digit.earnings.median_earnings_4yr,"
-    "latest.programs.cip_4_digit.debt.median_debt"
-)
+_PROGRAM = "latest.programs.cip_4_digit"
+# Field names verified against the live API (2026-11-12). Requesting a nested
+# sub-path returns only that leaf, so one page carries each school plus its
+# 4-digit-CIP programs without the ~50 repayment/count columns we never read.
+FIELD_OF_STUDY_FIELDS = ",".join((
+    "id", "school.name", "school.city", "school.state", "school.ownership",
+    "location.lat", "location.lon",
+    f"{_PROGRAM}.code", f"{_PROGRAM}.title",
+    f"{_PROGRAM}.credential.level", f"{_PROGRAM}.credential.title",
+    f"{_PROGRAM}.counts.ipeds_awards1",
+    f"{_PROGRAM}.earnings.1_yr.overall_median_earnings",
+    f"{_PROGRAM}.earnings.4_yr.overall_median_earnings",
+    f"{_PROGRAM}.earnings.5_yr.overall_median_earnings",
+    f"{_PROGRAM}.earnings.7_yr.overall_median_earnings",
+    f"{_PROGRAM}.debt.staff_grad_plus.all.eval_inst.median",
+    f"{_PROGRAM}.debt.staff_grad_plus.all.eval_inst.median_payment",
+))
 
 
 class ScorecardClient(IngestClient):
@@ -60,6 +70,7 @@ class ScorecardClient(IngestClient):
             self._base_url,
             params={
                 "api_key": self._api_key,
+                "school.operating": 1,
                 "fields": fields,
                 "page": page,
                 "per_page": PAGE_SIZE,

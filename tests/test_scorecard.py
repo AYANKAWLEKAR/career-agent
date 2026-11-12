@@ -107,3 +107,26 @@ def test_load_bulk_file_csv(tmp_path):
     assert len(records) == 1
     assert records[0].record_key == "110635"
     assert records[0].payload["INSTNM"] == "University of California-Berkeley"
+
+
+async def test_field_of_study_requests_live_api_field_names(respx_mock, client):
+    route = respx_mock.get(BASE_URL).respond(json={"metadata": {"total": 0}, "results": []})
+    await collect(client.fetch_field_of_study())
+    params = route.calls[0].request.url.params
+    fields = params["fields"].split(",")
+    prefix = "latest.programs.cip_4_digit"
+    # Live-verified 2026-11-12: these nested paths exist; the earlier flat
+    # names (earnings.median_earnings_1yr, debt.median_debt) return nothing.
+    for path in (
+        f"{prefix}.earnings.1_yr.overall_median_earnings",
+        f"{prefix}.earnings.4_yr.overall_median_earnings",
+        f"{prefix}.earnings.5_yr.overall_median_earnings",
+        f"{prefix}.earnings.7_yr.overall_median_earnings",
+        f"{prefix}.debt.staff_grad_plus.all.eval_inst.median",
+        f"{prefix}.credential.level",
+        "location.lat",
+        "school.ownership",
+    ):
+        assert path in fields, path
+    assert not any("median_earnings_1yr" in f for f in fields)
+    assert params["school.operating"] == "1"
